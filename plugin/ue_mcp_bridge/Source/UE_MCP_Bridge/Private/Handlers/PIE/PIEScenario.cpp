@@ -50,43 +50,7 @@ namespace MCPPIE
 	{
 		if (S.Name.IsEmpty()) OutErrors.Add(TEXT("scenario has no 'name'"));
 
-		// Arrange steps.
-		for (int32 i = 0; i < S.Arrange.Num(); ++i)
-		{
-			TSharedPtr<FJsonObject> O;
-			if (!StepObject(S.Arrange[i], O)) { OutErrors.Add(FString::Printf(TEXT("arrange[%d] is not an object"), i)); continue; }
-			FString Kind;
-			O->TryGetStringField(TEXT("kind"), Kind);
-			Kind = Kind.ToLower();
-			if (Kind == TEXT("spawn"))
-			{
-				FString C;
-				if (!O->TryGetStringField(TEXT("class"), C) || C.IsEmpty())
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] spawn needs 'class'"), i));
-			}
-			else if (Kind == TEXT("set"))
-			{
-				FString Tgt, Path;
-				if (!O->TryGetStringField(TEXT("target"), Tgt) || Tgt.IsEmpty())
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] set needs 'target'"), i));
-				if (!O->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] set needs 'path'"), i));
-				if (!O->HasField(TEXT("value")))
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] set needs 'value'"), i));
-			}
-			else if (Kind == TEXT("call"))
-			{
-				FString Tgt, Func;
-				if (!O->TryGetStringField(TEXT("target"), Tgt) || Tgt.IsEmpty())
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] call needs 'target'"), i));
-				if (!O->TryGetStringField(TEXT("func"), Func) || Func.IsEmpty())
-					OutErrors.Add(FString::Printf(TEXT("arrange[%d] call needs 'func'"), i));
-			}
-			else
-			{
-				OutErrors.Add(FString::Printf(TEXT("arrange[%d] unknown kind '%s' (spawn|set|call)"), i, *Kind));
-			}
-		}
+		ValidateArrange(S.Arrange, TEXT("arrange"), OutErrors);
 
 		// Act steps. 'call' is validated per-kind like arrange's, because a
 		// mistyped target or func in a timed step fails by silently never
@@ -131,6 +95,46 @@ namespace MCPPIE
 		}
 
 		return OutErrors.Num() == 0;
+	}
+
+	void FPIEScenario::ValidateArrange(const TArray<TSharedPtr<FJsonValue>>& Arrange, const FString& Where, TArray<FString>& OutErrors)
+	{
+		for (int32 i = 0; i < Arrange.Num(); ++i)
+		{
+			TSharedPtr<FJsonObject> O;
+			if (!StepObject(Arrange[i], O)) { OutErrors.Add(FString::Printf(TEXT("%s[%d] is not an object"), *Where, i)); continue; }
+			FString Kind;
+			O->TryGetStringField(TEXT("kind"), Kind);
+			Kind = Kind.ToLower();
+			if (Kind == TEXT("spawn"))
+			{
+				FString C;
+				if (!O->TryGetStringField(TEXT("class"), C) || C.IsEmpty())
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] spawn needs 'class'"), *Where, i));
+			}
+			else if (Kind == TEXT("set"))
+			{
+				FString Tgt, Path;
+				if (!O->TryGetStringField(TEXT("target"), Tgt) || Tgt.IsEmpty())
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] set needs 'target'"), *Where, i));
+				if (!O->TryGetStringField(TEXT("path"), Path) || Path.IsEmpty())
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] set needs 'path'"), *Where, i));
+				if (!O->HasField(TEXT("value")))
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] set needs 'value'"), *Where, i));
+			}
+			else if (Kind == TEXT("call"))
+			{
+				FString Tgt, Func;
+				if (!O->TryGetStringField(TEXT("target"), Tgt) || Tgt.IsEmpty())
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] call needs 'target'"), *Where, i));
+				if (!O->TryGetStringField(TEXT("func"), Func) || Func.IsEmpty())
+					OutErrors.Add(FString::Printf(TEXT("%s[%d] call needs 'func'"), *Where, i));
+			}
+			else
+			{
+				OutErrors.Add(FString::Printf(TEXT("%s[%d] unknown kind '%s' (spawn|set|call)"), *Where, i, *Kind));
+			}
+		}
 	}
 
 	TSharedRef<FJsonObject> FPIEScenario::ToJson(const FScenario& S)

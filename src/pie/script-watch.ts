@@ -351,6 +351,10 @@ function toStep(raw: Record<string, unknown> | undefined, index: number, fallbac
   if (typeof r.ended_at_ms === "number") step.endedAtMs = r.ended_at_ms;
   if (typeof r.source_status === "string") step.sourceStatus = r.source_status as ScriptStepStatus;
   if (typeof r.regression === "boolean") step.regression = r.regression;
+  if (Array.isArray(r.arrange)) step.arrange = r.arrange as Array<Record<string, unknown>>;
+  if (Array.isArray(r.act)) step.act = r.act as Array<Record<string, unknown>>;
+  const actResult = r.act_result ?? r.actResult;
+  if (actResult && typeof actResult === "object") step.actResult = actResult as Record<string, unknown>;
   return step;
 }
 
@@ -401,6 +405,9 @@ export function mapBridgeEvent(e: BridgeScriptEvent, w: { runId: string; script:
       if (!("status" in data)) raw.status = STATUS_AFTER[e.type];
       return { ...base, type: e.type, step: toStep(raw, stepIndex, STATUS_AFTER[e.type]) };
     }
+    case "step_acted":
+      // The step keeps the status it had; the event's news is act_result.
+      return { ...base, type: "step_acted", step: toStep(stepRaw(), stepIndex, "running") };
     case "verdict": {
       const raw = stepRaw();
       if (!("status" in data) && typeof data.verdict === "string") {

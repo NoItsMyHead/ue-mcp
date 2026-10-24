@@ -69,6 +69,9 @@ const PER_SESSION: Record<string, string> = {
   "server/runtime.ts": "Owns the session registry, each session's load, guards and bridge, and the targeting baked into the tool graph.",
   "server/mcp-server.ts": "Dispatches each MCP connection's calls through the runtime's sessions.",
   "daemon/daemon.ts": "One daemon per project root: it owns that project's runtime and follows each of its editors.",
+  "daemon/checkpoint-routes.ts": "Resolves the editor session each request names before acting on its checkpoints.",
+  "checkpoints/service.ts": "One checkpoint state per editor session: its toggle, its bridge's save recording and its project's history.",
+  "checkpoints/shadow-repo.ts": "One project's shadow history, constructed with that project's directory and never another's.",
   "daemon/discovery.ts": "Publishes and reads the discovery record of one project root's daemon.",
   "daemon/start-lock.ts": "Holds the start lock of one project root's daemon, so that project gets one daemon.",
   "daemon/server-mode.ts": "Reads how the one project it is handed is served, from that project's config.",
@@ -206,11 +209,13 @@ const SESSION_INDEPENDENT: Record<string, string> = {
 
   "flow/events.ts": "One process-wide event bus. Which editor a run belongs to rides on the event, not here.",
   "pie/script-events.ts": "One process-wide bus for script run events. The run id rides on the event.",
+  "checkpoints/text-diff.ts": "A line diff of two strings. No editor or project is involved.",
   "extensions/superseded.ts": "A constant list of plugins core replaced. No editor is involved.",
   "flow/schema.ts": "Shared flow schema declarations.",
   "flow/model-provider.ts": "One process-wide model for flow agent steps, registered by a daemon extension or read from the environment. No editor is involved.",
   "flow/agent-step.ts": "Puts the resolved model on an agent step's context. No editor is involved.",
   "flow/rollback.ts": "Pure shaping of a rollback record.",
+  "flow/flow-inputs.ts": "Pure derivation of a flow's inputs from the tool graph and config it is handed.",
   "flow/handler-outcome.ts": "Pure reading of a handler's own verdict off the body it answered with.",
   "flow/write-methods.ts": "Pure classification of a bridge call against the recorded handler specs.",
 

@@ -11,7 +11,7 @@
  *
  * Run with flow(run, flowName: "playtest", params: { target, context? }).
  */
-import type { TaskResult, TaskConstructor } from "@db-lyon/flowkit";
+import type { TaskResult, TaskConstructor, OptionSpecs } from "@db-lyon/flowkit";
 import { UeMcpTask } from "../task.js";
 import { runBridge } from "./run-action.js";
 import { ModelAgentTask } from "./agent-step.js";
@@ -113,6 +113,14 @@ async function read(task: { bridge: { call(m: string, p?: Record<string, unknown
 
 /** Step 1: the target Blueprint, its input mappings and the values PIE can watch. */
 export class PlaytestGatherTask extends UeMcpTask<{ target?: string; context?: string; profile?: string; name?: string }> {
+  /** What a run passes in params, which flow(plan) reports as the flow's inputs. */
+  static optionsSchema = {
+    target: { type: "string", required: true, description: "Asset path of the Blueprint to test, or a description of it to search for." },
+    context: { type: "string", description: "What to test." },
+    profile: { type: "string", description: "The pie(script_values) profile whose values the script may watch." },
+    name: { type: "string", description: "Script name. Derived from the target when omitted." },
+  } satisfies OptionSpecs;
+
   get taskName() { return "playtest.gather"; }
 
   async execute(): Promise<TaskResult> {
@@ -236,6 +244,10 @@ export class PlaytestCheckTask extends UeMcpTask<{ draft?: unknown; previous?: u
 
 /** Step 8: pie(script_create) with the draft that passed. */
 export class PlaytestSaveTask extends UeMcpTask<{ checked?: unknown; name?: string; package_path?: string; profile?: string }> {
+  static optionsSchema = {
+    package_path: { type: "string", description: "Content folder the script is saved in." },
+  } satisfies OptionSpecs;
+
   get taskName() { return "playtest.save"; }
 
   async execute(): Promise<TaskResult> {

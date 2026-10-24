@@ -19,13 +19,15 @@ Every action on this page is in the `pie` category.
 | `instruction` | string | Required. What the person does, or what they check. Shown on the verdict form for a manual step. |
 | `judge` | `auto` or `manual` | Default `auto`. `auto`: the bridge decides from `expect`. `manual`: the step waits for a verdict. |
 | `agent_judgeable` | boolean | Manual steps only, default `true`. `false` means only a person can give the verdict: `verdict` refuses `source: "agent"` for the step. Refused on an auto step. |
-| `resolve_in_pie` | boolean | Default `false`, and only on a step with `expect`. `true` means `expect.value` only exists once PIE is running, such as an actor spawned during play, so `script_create` and `script_update` do not check it against the level. |
+| `resolve_in_pie` | boolean | Default `false`, and only on a step with `expect`, `arrange` or `act`. `true` means `expect.value`, and the actors `arrange` and `act` name, only exist once PIE is running, such as an actor spawned during play, so `script_create` and `script_update` do not check them against the level. |
+| `arrange` | array | Optional. Run when the step starts: a scenario's arrange entries, `{kind: "spawn", class, at?, rotation?, scale?}`, `{kind: "set", target, path, value}` or `{kind: "call", target, func, args?}`. |
+| `act` | array | Optional. Run after `arrange`: the step actions `uat_run` takes in a step's `do` (see [Arrange and act](#arrange-and-act)). |
 | `expect.value` | string | Required in `expect`. For `decreasing`, `increasing`, `eq`, `gt` and `lt`: a tracked value path, or its last segment. For `exists`: an actor id. For `visible`: a widget class or name. |
 | `expect.op` | string | Required in `expect`. One of the ops below. |
 | `expect.target` | number or boolean | Required for `eq`, `gt` and `lt`. Optional for `visible` and `exists`, default `true`; `false` asks for the opposite. Refused for `decreasing` and `increasing`. A boolean given to `eq`, `gt` or `lt` is read as 1 or 0. |
-| `expect.within_ms` | integer | How long the step has to meet its expectation, in game milliseconds from the moment it starts. 0 or absent uses the run's `default_within_ms`. |
+| `expect.within_ms` | integer | How long the step has to meet its expectation, in game milliseconds from the moment it starts, or from the end of its `act` when it has one. 0 or absent uses the run's `default_within_ms`. |
 
-A manual step takes no `expect`, and a step that has one is refused. An auto step without `expect` passes as soon as it starts, with `evidence.reason` set to `no expectation`.
+A manual step takes no `expect`, and a step that has one is refused. An auto step without `expect` passes as soon as it starts (once its `act` ends, when it has one), with `evidence.reason` set to `no expectation`.
 
 A value the profile does not track is added to the observer for the run, so a script can name values, actors and widgets that no profile lists.
 
@@ -43,7 +45,32 @@ An auto step is checked on every observed frame from the frame it starts. It pas
 | `visible` | The widget is visible (or not, with `target: false`). |
 | `exists` | The actor resolves in the PIE world (or does not, with `target: false`). |
 
-Auto steps run one at a time. The next step starts on the frame the previous one settled, so the baseline of a `decreasing` or `increasing` step is the value at that frame.
+Auto steps run one at a time. The next step starts on the frame the previous one settled, so the baseline of a `decreasing` or `increasing` step is the value at that frame, or at the frame its `act` ended.
+
+### Arrange and act
+
+A step can set up and drive what it then checks, so a script runs end to end with nobody at the controls:
+
+```json
+{
+  "instruction": "Open the door",
+  "arrange": [{ "kind": "set", "target": "Door", "path": "OpenAngle", "value": 0 }],
+  "act": [
+    { "place": { "at": "Door", "offset": [-150, 0, 0] } },
+    { "press": { "action": "/Game/Input/IA_Interact.IA_Interact" } }
+  ],
+  "expect": { "value": "Door.OpenAngle", "op": "gt", "target": 80, "within_ms": 3000 }
+}
+```
+
+- **Order.** `arrange`, then `act`, then the `expect` window opens. `within_ms` counts from the end of `act`. The run holds at the step until its act ends, so the next step never starts in the middle of one.
+- **arrange** entries are a scenario's, applied by the same code `scenario_validate` checks them with: `spawn` a class (native or a Blueprint path, with or without `_C`), `set` a property on an actor by dotted path, `call` a function on an actor. An actor is named by label, name or class.
+- **act** entries are the step actions `uat_run` runs, through the same executor: `place` (`{at, offset?, face?}` next to an actor, facing it, or `{location, yaw?}`), `press` (`{action, frames?}`), `inject` (`{action, value}`), `hold` (`{action, value, ms}`), `tape` (`{action, values}`), `console`, `capture` (a label or `true`; the file lands under `<output_dir>/captures/`) and `wait_ms`. `client` (default 0, the editor's own player) sends an entry to a remote player. An act ends once every entry ran, every hold and tape on the editor's player played out, and every remote player confirmed what it was sent.
+- **A manual step may carry `act`**: the engine sets the scene, then the step asks for its verdict. A manual step with `act` starts its own block of manual steps.
+- **An act that fails fails its step**, with the reason in `evidence.reason`, and the run moves on.
+- `script_create`, `script_update` and `script_validate` resolve the actor every `set`, `call` and `place` names, the class every `spawn` names and the Input Action every `press`, `inject`, `hold` and `tape` names, and refuse one that does not exist with the field at fault, such as `act[1].press.action` or `arrange[0].target`, and candidates. `resolve_in_pie: true` lets an actor that only exists in PIE through; classes and Input Actions are always checked.
+- A [manual run](#manual-runs) has no PIE and a [replay](#replay-regression) replays the recorded input, so neither runs `arrange` or `act`. The step's `act_result` says so.
+- What the act did is in the step's `act_result` and on its `step_acted` event: `{status, reason?, arranged, actions: [{index, action, ok, error?, at_ms}], started_at_ms, ended_at_ms, duration_ms, wall_ms, captures?}`. `status` is `running`, `done`, `failed` or `skipped`. Times are game milliseconds, except `wall_ms`.
 
 ## Storing scripts
 
@@ -68,6 +95,8 @@ A profile that does not exist is refused. `steps` must hold at least one step.
 - **The value has to resolve**, the way the observer reads it, against the level open in the editor and the script's profile. A numeric op reads a profile tracked value (its path or last segment), a property path on the player pawn (the pawn player 0 possesses in the level, or the game mode's `DefaultPawnClass`), a component's property (`CollisionCylinder.CapsuleHalfHeight`), `sub:<Subsystem>.<path>`, or `bone:<bone>.<channel>`. `exists` needs an actor in the level, or a class the game mode spawns. `visible` needs a widget class, a Widget Blueprint, or a widget inside one.
 - **The op and target have to suit the value's type.** A bool takes only `eq` with `true` or `false`, an enum only `eq` with one of its values, and a number a number target. An integer is refused an `eq` target it cannot hold, and a `gt` or `lt` target it can never pass.
 - **A script needs an auto step with an `expect`.** A script judged entirely by verdicts says so with `manual_only: true`.
+
+- **What arrange and act name has to exist**: the actors, actor classes and Input Actions ([Arrange and act](#arrange-and-act)).
 
 A value that only exists once PIE is running, such as an actor spawned during play, is let through by `resolve_in_pie: true` on its step. The step's op and target are still checked as far as they can be without a type.
 
@@ -181,7 +210,7 @@ A run finishes with `stop_reason` `all steps settled` once every step has passed
 pie(action="script_run", script="/Game/PIEStudio/Scripts/DoorOpens", mode="manual")
 ```
 
-A manual run starts no PIE, observer or recording. Every manual step awaits its verdict from the start and takes it in any order through `verdict`; auto steps stay `pending` and the summary counts them under `unchecked`. The run finishes once every manual step has a verdict, and writes `results.json` with `mode: "manual"`. A full run started later on the same script is a new run with no verdicts. Answers, `results.json` and every event carry `mode`.
+A manual run starts no PIE, observer or recording. Every manual step awaits its verdict from the start and takes it in any order through `verdict`; auto steps stay `pending` and the summary counts them under `unchecked`. The run finishes once every manual step has a verdict, and writes `results.json` with `mode: "manual"`. A full run started later on the same script is a new run with no verdicts. Answers, `results.json` and every event carry `mode`. With no PIE, no step's `arrange` or `act` runs; each step that has them carries `act_result` with `status: "skipped"` and the reason.
 
 ## Manual steps and verdicts
 
@@ -313,10 +342,12 @@ The step records `verdict_source: "agent"` and the evidence in `results.json`, o
 | `steps[].within_ms` | The step's effective window. |
 | `steps[].started_at_ms`, `ended_at_ms` | Game ms from the observer's first frame. Absent for a step that never started or ended. |
 | `steps[].started_at`, `ended_at` | ISO 8601 UTC wall time. |
-| `steps[].evidence` | Auto steps with `expect`: `value`, `at_start` and `at_end` (first and last observed value in the step, `null` when never read; 1 or 0 for `visible` and `exists`), `samples`, `observed`, `verdict_frame` (the observer frame of the verdict), `verdict_at_ms` (ms from the step's start to its verdict) and `reason` (why it failed). Manual steps carry the verdict's `{ note, captures? }` when it had evidence, which an agent verdict always has. Other steps carry `evidence` only as `{ reason }`, when there is one. |
+| `steps[].evidence` | Auto steps with `expect`: `value`, `at_start` and `at_end` (first and last observed value in the step, `null` when never read; 1 or 0 for `visible` and `exists`), `samples`, `observed`, `verdict_frame` (the observer frame of the verdict), `verdict_at_ms` (ms from the step's start, or the end of its act, to its verdict) and `reason` (why it failed). Manual steps carry the verdict's `{ note, captures? }` when it had evidence, which an agent verdict always has. Other steps carry `evidence` only as `{ reason }`, when there is one. |
 | `steps[].note` | The verdict's note. |
 | `steps[].verdict_source` | `auto`, `action` (a person, through `verdict`), `elicitation` (a person, through the form), `agent`, or `source_run` on a replay. |
 | `steps[].agent_judgeable` | Manual steps: whether an agent verdict is accepted. |
+| `steps[].arrange`, `act` | The step's arrange and act entries, as written. Absent when it has none. |
+| `steps[].act_result` | Steps with `arrange` or `act`: what they did and how long it took ([Arrange and act](#arrange-and-act)). |
 
 ## Replay regression
 
@@ -328,7 +359,8 @@ pie(action="script_replay", run_id="script_DoorOpens_20261023_100000", wait=true
 
 The answer is the replay run's status, as for `script_run`, plus `pie_started`, `auto_stop_pie`, `time_scale`, `replay_of` and `message`.
 
-- Each auto step that started in the source run gets a window from `window_start_ms` (its source `started_at_ms` plus `replay_offset_ms`, the recording's settle time) to `window_end_ms` (`window_start_ms` plus `within_ms`). It starts on the first frame at or after `window_start_ms` and is judged as in a live run. Steps are judged in their own windows, not one after another.
+- `arrange` and `act` do not run again: the recording carries the input the act drove. Each step that has them says so in `act_result` (`status: "skipped"`). What arrange set and what `place` and `console` did is not input, so a step that depends on them can fail in a replay.
+- Each auto step that started in the source run gets a window from `window_start_ms` (its source `started_at_ms`, or the end of its source act, plus `replay_offset_ms`, the recording's settle time) to `window_end_ms` (`window_start_ms` plus `within_ms`). It starts on the first frame at or after `window_start_ms` and is judged as in a live run. Steps are judged in their own windows, not one after another.
 - An auto step that never started in the source run is `skipped` with reason `not reached in the source run`.
 - A manual step keeps the source run's verdict, note and evidence, with `verdict_source: "source_run"`. One without a verdict there is `skipped` with reason `no verdict in the source run`.
 - Every step carries `source_status` (its status in the source run) and `regression`, which is `true` when it passed in the source run and failed in the replay.
@@ -368,6 +400,7 @@ The daemon publishes every event of a run the server follows on its event stream
 |---|---|---|
 | `script.run_started` | The run was armed. | `resultsPath?` |
 | `script.step_started` | A step began. | `step` |
+| `script.step_acted` | A step's arrange and act ended, done or failed. | `step`, with `actResult` |
 | `script.step_passed` | An auto step met its expectation. | `step` |
 | `script.step_failed` | An auto step did not, or the run ended while it ran. | `step` |
 | `script.verdict_requested` | Manual steps wait for a verdict. | `awaiting`: `[{ index, instruction }]` |
@@ -376,7 +409,7 @@ The daemon publishes every event of a run the server follows on its event stream
 
 Every payload carries `runId`, `script` (the asset path, or `inline`), `at` (the editor's ISO wall time of the event), `atMs` (the event's `at_ms`: game ms from the observer's first frame, 0 for `run_started`), `seq` (the editor's number for the event, increasing within a run) and, for a replay, `replayOf`.
 
-`step` is `{ index, instruction, judge, agentJudgeable?, expect?, status, evidence?, note?, verdictSource?, withinMs?, startedAtMs?, endedAtMs?, sourceStatus?, regression? }`. `evidence` is the editor's evidence object, unchanged. `verdictSource` is `auto`, `action`, `elicitation`, `agent` or, on a replay, `source_run`; `sourceStatus` and `regression` appear on a replay only. Fields the event does not carry are filled from the status the server read with it, so a `step_started` step can already hold `evidence` and `verdictSource`. `summary` on `run_finished` is `{ total, passed, failed, skipped, pending, awaiting?, humanVerdicts?, agentVerdicts? }`, plus `regressions` on a replay.
+`step` is `{ index, instruction, judge, agentJudgeable?, expect?, arrange?, act?, actResult?, status, evidence?, note?, verdictSource?, withinMs?, startedAtMs?, endedAtMs?, sourceStatus?, regression? }`. `actResult` is the step's `act_result`, unchanged. `evidence` is the editor's evidence object, unchanged. `verdictSource` is `auto`, `action`, `elicitation`, `agent` or, on a replay, `source_run`; `sourceStatus` and `regression` appear on a replay only. Fields the event does not carry are filled from the status the server read with it, so a `step_started` step can already hold `evidence` and `verdictSource`. `summary` on `run_finished` is `{ total, passed, failed, skipped, pending, awaiting?, humanVerdicts?, agentVerdicts? }`, plus `regressions` on a replay.
 
 ```text
 id: 412

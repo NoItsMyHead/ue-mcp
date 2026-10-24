@@ -180,7 +180,9 @@ Unreal Insights traces are `editor(start_trace)` and `editor(stop_trace)`.
 
 A predicate binds a channel or event to an operator under a temporal quantifier: `{name, channel|event, op, value|min+max|tol, hold, from_s, to_s, within_s, after_event, severity}`. Operators are `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `approx`, `between`, `changed`, `increased`, `decreased` and `crossed`. `hold` is `always`, `never`, `eventually`, `at_end` or `once_then_always`. Channels are series columns (`pos_z`, `speed2d`, `game_ms`), tracked values by path (`t:Boss.Health`) and the pseudo-channels `$errors`, `$warnings`, `$frame` and `$time`. Events are `montage`, `marker` and `error`.
 
-A scenario's act steps are `replay`, `inject_tape`, `drive`, `goto`, `face`, `follow` and `call`. Arrange steps `spawn`, `set` and `call` arrange live actors; a `call` runs in the PIE instance that owns the actor.
+A scenario file's `act` list (kinds `replay`, `inject_tape`, `drive`, `goto`, `face`, `follow` and `call`) is written by `scenario_scaffold` and checked by `scenario_validate`, but no action runs it yet. Its arrange steps `spawn`, `set` and `call` do run, in test scripts below; a `call` runs in the PIE instance that owns the actor. The actions that drive a player are `uat_run`'s step actions.
+
+A test script step takes the same arrange entries, applied by the code that applies a scenario's, and an `act` of the step actions `uat_run` drives in a step's `do` (`place`, `press`, `inject`, `hold`, `tape`, `console`, `capture`, `wait_ms`), run by the same executor. The step runs `arrange`, then `act`, then opens its `expect` window, so a script runs end to end with no agent: `place` the player at the door, `press` Interact, expect `Door.OpenAngle gt 80`. See [Arrange and act](pie-scripts.md#arrange-and-act).
 
 ### Observation profiles
 

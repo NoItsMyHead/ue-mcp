@@ -75,8 +75,16 @@ struct FMCPPIETestStep
 	bool bAgentJudgeable = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Step",
-		meta=(EditCondition="bHasExpect", ToolTip="The expected value only resolves once PIE runs, such as a spawned actor, so authoring does not check it against the level."))
+		meta=(ToolTip="The expected value, and the actors arrange and act name, only resolve once PIE runs, such as a spawned actor, so authoring does not check them against the level."))
 	bool bResolveInPIE = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Step",
+		meta=(MultiLine="true", ToolTip="JSON array of arrange entries run when the step starts: {kind: spawn|set|call, ...}, as a scenario's arrange."))
+	FString ArrangeJson;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Step",
+		meta=(MultiLine="true", ToolTip="JSON array of step actions run after arrange, before the expectation is watched: tape, press, hold, inject, console, place, capture, wait_ms, as pie(uat_run) takes them."))
+	FString ActJson;
 };
 
 UCLASS(BlueprintType)

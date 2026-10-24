@@ -78,6 +78,7 @@ nav:
     - Test scripts: pie-scripts.md
   - Flows:
     - flows.md
+  - Checkpoints: checkpoints.md
   - Plugins:
     - plugins.md
     - Registry (plugins.ue-mcp.com): https://plugins.ue-mcp.com

@@ -2,6 +2,9 @@
 #include "Handlers/PIE/MCPPIEObservationProfile.h"
 #include "Handlers/PIE/PIEObserver.h"
 #include "Handlers/PIE/PIESequenceFormat.h"
+#include "Handlers/PIE/PIEStepActions.h"
+#include "Handlers/PIE/PIEActorPuppet.h"
+#include "InputAction.h"
 #include "HandlerClassResolve.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Blueprint/WidgetTree.h"
@@ -589,6 +592,59 @@ namespace MCPPIE
 		return bOk;
 	}
 
+	namespace
+	{
+		void DraftCheckLookup(int32 Step, const FString& Field, const FString& What, const FString& Name,
+			const TFunction<FScriptLookup(const FString&)>& Resolve, const FString& Hint, TArray<FScriptStepIssue>& Out)
+		{
+			const FScriptLookup L = Resolve ? Resolve(Name) : FScriptLookup();
+			if (L.bFound) return;
+			const FString Why = L.Message.IsEmpty() ? FString(TEXT("nothing to resolve it against")) : L.Message;
+			Out.Add(DraftCheckIssue(Step, Field, FString::Printf(TEXT("steps[%d].%s: %s '%s' cannot be found: %s.%s"),
+				Step, *Field, *What, *Name, *Why, *Hint), L.Candidates));
+		}
+
+		// The actors, actor classes and Input Actions a step's arrange and act name, resolved the way the run will.
+		void DraftCheckArrangeAndAct(int32 Step, const FScriptStepDef& S, const FScriptValidationContext& Ctx,
+			const FString& InPIEHint, TArray<FScriptStepIssue>& Out)
+		{
+			// Assets resolve without PIE; actors may only exist once it runs.
+			for (int32 J = 0; J < S.Arrange.Num(); ++J)
+			{
+				const TSharedPtr<FJsonObject>* O = nullptr;
+				if (!S.Arrange[J].IsValid() || !S.Arrange[J]->TryGetObject(O) || !O) continue;
+				FString Kind, Name;
+				(*O)->TryGetStringField(TEXT("kind"), Kind);
+				Kind = Kind.ToLower();
+				const FString Where = FString::Printf(TEXT("arrange[%d]"), J);
+				if (Kind == TEXT("spawn") && (*O)->TryGetStringField(TEXT("class"), Name))
+				{
+					DraftCheckLookup(Step, Where + TEXT(".class"), TEXT("actor class"), Name, Ctx.ResolveActorClass, FString(), Out);
+				}
+				else if ((Kind == TEXT("set") || Kind == TEXT("call")) && !S.bResolveInPIE && (*O)->TryGetStringField(TEXT("target"), Name))
+				{
+					DraftCheckLookup(Step, Where + TEXT(".target"), TEXT("actor"), Name, Ctx.ResolveActor, InPIEHint, Out);
+				}
+			}
+			for (int32 J = 0; J < S.Act.Num(); ++J)
+			{
+				const TSharedPtr<FJsonObject>* O = nullptr;
+				FStepAction A;
+				FString Err;
+				if (!S.Act[J].IsValid() || !S.Act[J]->TryGetObject(O) || !O || !ParseStepAction(*O, A, Err)) continue;
+				const FString Where = FString::Printf(TEXT("act[%d].%s"), J, *A.Verb);
+				if (A.UsesInputAction())
+				{
+					DraftCheckLookup(Step, Where + TEXT(".action"), TEXT("Input Action"), A.ActionPath, Ctx.ResolveInputAction, FString(), Out);
+				}
+				else if (A.Kind == FStepAction::EKind::Place && !A.At.IsEmpty() && !S.bResolveInPIE)
+				{
+					DraftCheckLookup(Step, Where + TEXT(".at"), TEXT("actor"), A.At, Ctx.ResolveActor, InPIEHint, Out);
+				}
+			}
+		}
+	}
+
 	void ValidateScriptSteps(const TArray<FScriptStepDef>& Steps, bool bManualOnly, const FScriptValidationContext& Ctx,
 		TArray<FScriptStepIssue>& OutIssues, const TSet<int32>& SkipSteps)
 	{
@@ -598,6 +654,7 @@ namespace MCPPIE
 		{
 			if (SkipSteps.Contains(I)) continue;
 			const FScriptStepDef& S = Steps[I];
+			DraftCheckArrangeAndAct(I, S, Ctx, InPIEHint, OutIssues);
 			if (S.Judge != EScriptJudge::Auto || !S.bHasExpect) continue;
 			++Checkable;
 			const FScriptExpect& E = S.Expect;
@@ -859,6 +916,31 @@ namespace MCPPIE
 		Ctx.ResolveWidget = [](const FString& Widget) -> FScriptLookup
 		{
 			return DraftCheckWidget(Widget);
+		};
+		Ctx.ResolveInputAction = [](const FString& Path) -> FScriptLookup
+		{
+			FScriptLookup L;
+			if (Cast<UInputAction>(FSoftObjectPath(Path).TryLoad()))
+			{
+				L.bFound = true;
+				return L;
+			}
+			TArray<FString> Paths;
+			FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+			TArray<FAssetData> Assets;
+			ARM.Get().GetAssetsByClass(UInputAction::StaticClass()->GetClassPathName(), Assets, true);
+			for (const FAssetData& A : Assets) Paths.Add(A.GetSoftObjectPath().ToString());
+			L.Message = TEXT("no Input Action loads from that path (an object path such as /Game/Input/IA_Jump.IA_Jump)");
+			L.Candidates = RankScriptCandidates(Path, Paths);
+			return L;
+		};
+		Ctx.ResolveActorClass = [](const FString& Path) -> FScriptLookup
+		{
+			FScriptLookup L;
+			FString Err;
+			L.bFound = FPIEActorPuppet::ResolveActorClass(Path, Err) != nullptr;
+			if (!L.bFound) L.Message = Err;
+			return L;
 		};
 		return Ctx;
 	}

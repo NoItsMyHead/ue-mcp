@@ -27,6 +27,9 @@ namespace MCPPIE
 	enum class EScriptStepStatus : uint8 { Pending, Running, Passed, Failed, AwaitingVerdict, Skipped };
 	enum class EScriptRunState : uint8 { Idle, Armed, Running, AwaitingVerdict, Finished, Stopped };
 	enum class EScriptExpectOutcome : uint8 { Pending, Passed, Failed };
+	// A step's arrange and act: none to run, running, done, failed, or skipped (a manual or replay run).
+	enum class EScriptActState : uint8 { None, Running, Done, Failed, Skipped };
+	enum class EScriptActOutcome : uint8 { Running, Done, Failed };
 
 	FString ScriptJudgeToString(EScriptJudge Judge);
 	bool ParseScriptJudge(const FString& Str, EScriptJudge& Out);
@@ -36,6 +39,8 @@ namespace MCPPIE
 	bool ParseScriptStepStatus(const FString& Str, EScriptStepStatus& Out);
 	FString ScriptRunStateToString(EScriptRunState State);
 	bool ParseScriptRunState(const FString& Str, EScriptRunState& Out);
+	FString ScriptActStateToString(EScriptActState State);
+	bool ParseScriptActState(const FString& Str, EScriptActState& Out);
 
 	// visible / exists read a boolean.
 	bool IsScriptBooleanOp(EScriptExpectOp Op);
@@ -66,9 +71,35 @@ namespace MCPPIE
 		FScriptExpect Expect;
 		// Manual steps: false refuses a verdict with source agent.
 		bool bAgentJudgeable = true;
-		// expect.value only resolves once PIE runs (a spawned actor, a widget created at runtime),
-		// so the draft-time check leaves it alone.
+		// expect.value, and the actors arrange and act name, only resolve once PIE runs (a spawned
+		// actor, a widget created at runtime), so the draft-time check leaves them alone.
 		bool bResolveInPIE = false;
+		// Run before the expect window opens, in this order. Arrange entries are a scenario's
+		// {kind: spawn|set|call} (FPIEScenario::ApplyArrange); act entries are uat_run's step
+		// actions (FStepActionRunner). Raw JSON, checked when the step is parsed.
+		TArray<TSharedPtr<FJsonValue>> Arrange;
+		TArray<TSharedPtr<FJsonValue>> Act;
+
+		bool HasArrangeOrAct() const { return Arrange.Num() > 0 || Act.Num() > 0; }
+	};
+
+	// What a step's arrange and act did.
+	struct FScriptActReport
+	{
+		EScriptActState State = EScriptActState::None;
+		// Arrange entries applied.
+		int32 Arranged = 0;
+		// Game ms from the observer's first frame. EndedAtMs opens the expect window.
+		double StartedAtMs = -1.0;
+		double EndedAtMs = -1.0;
+		// Wall milliseconds the act took.
+		double WallMs = 0.0;
+		// Why it failed or was skipped.
+		FString Reason;
+		// One per act entry reached: {index, action, ok, error?, at_ms}.
+		TArray<TSharedPtr<FJsonValue>> Actions;
+		// Absolute paths of the captures act wrote.
+		TArray<FString> Captures;
 	};
 
 	struct FScriptDef
@@ -83,7 +114,7 @@ namespace MCPPIE
 
 	// ── Step definitions: JSON and asset ────────────────────────────────
 
-	// {instruction, judge, agent_judgeable, resolve_in_pie, expect:{value, op, target (number or boolean), within_ms}}.
+	// {instruction, judge, agent_judgeable, resolve_in_pie, arrange:[...], act:[...], expect:{value, op, target (number or boolean), within_ms}}.
 	// OutField, when given, names the field the error is about, such as instruction or expect.op.
 	bool ParseScriptStepJson(const TSharedPtr<FJsonValue>& Value, int32 Index, FScriptStepDef& Out, FString& OutError, FString* OutField = nullptr);
 	bool ParseScriptStepsJson(const TArray<TSharedPtr<FJsonValue>>& Values, TArray<FScriptStepDef>& Out, FString& OutError);
@@ -157,6 +188,10 @@ namespace MCPPIE
 		bool bRegression = false;
 		double WindowStartMs = -1.0;
 		double WindowEndMs = -1.0;
+		FScriptActReport Act;
+
+		// Where within_ms counts from: the end of act, else the step's start.
+		double ExpectFromMs() const { return Act.EndedAtMs >= 0.0 ? Act.EndedAtMs : StartedAtMs; }
 	};
 
 	struct FScriptEvent
@@ -230,6 +265,21 @@ namespace MCPPIE
 	// Reads the live value an expectation names; false while unreadable. Boolean ops yield 1 or 0.
 	using FScriptValueReader = TFunctionRef<bool(const FScriptExpect&, double&)>;
 
+	// Runs a step's arrange and act against PIE. The run model calls it, so tests drive the model with a fake.
+	class IScriptStepDriver
+	{
+	public:
+		virtual ~IScriptStepDriver() = default;
+		// Applies the step's arrange and starts its act. False, with Report.Reason, when either cannot start.
+		virtual bool BeginAct(int32 Index, const FScriptStepDef& Def, double NowMs, FScriptActReport& Report) = 0;
+		// Moves the act on. Done once every entry ran and its input played out; Failed with Report.Reason.
+		virtual EScriptActOutcome TickAct(double NowMs, FScriptActReport& Report) = 0;
+		// The run ended: stop whatever the act left running.
+		virtual void Cancel() {}
+	};
+
+	TSharedRef<FJsonObject> ScriptActReportToJson(const FScriptActReport& Report);
+
 	void InitScriptRun(FScriptRun& Run, const TArray<FScriptStepDef>& Steps);
 	// full or manual.
 	FString ScriptRunModeToString(const FScriptRun& Run);
@@ -238,8 +288,9 @@ namespace MCPPIE
 	// A manual run is done once every manual step has its verdict.
 	bool AreScriptManualStepsSettled(const FScriptRun& Run);
 	void AddScriptEvent(FScriptRun& Run, const FString& Type, int32 Step, const TSharedPtr<FJsonObject>& Data);
-	// Sequential mode: steps start in order; a running auto step holds the run.
-	void AdvanceScriptRun(FScriptRun& Run, double NowMs, int64 Frame, FScriptValueReader Reader);
+	// Sequential mode: steps start in order; a running auto step holds the run, and so does a step's act.
+	// Without a driver a step's arrange and act are skipped.
+	void AdvanceScriptRun(FScriptRun& Run, double NowMs, int64 Frame, FScriptValueReader Reader, IScriptStepDriver* Driver = nullptr);
 	// Replay mode: every auto step is judged in its own recorded window.
 	void AdvanceScriptReplay(FScriptRun& Run, double NowMs, int64 Frame, FScriptValueReader Reader);
 	// Manual steps only. Source is human (recorded as action), elicitation or agent; an agent
@@ -320,6 +371,7 @@ namespace MCPPIE
 
 		FScriptRun Run;
 		bool bHasRun = false;
+		TSharedPtr<IScriptStepDriver> StepDriver;
 
 		FDelegateHandle EndPIEHandle;
 		FDelegateHandle EndFrameHandle;

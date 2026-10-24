@@ -70,7 +70,7 @@ function endState(uproject: string) {
     plugins: names,
     duplicatePlugins: names.length !== new Set(names.map((n) => n.toLowerCase())).size,
     config: fs.existsSync(path.join(dir, "ue-mcp.yml")),
-    launch: mcp.mcpServers["ue-mcp"].args[1],
+    launch: (mcp.mcpServers["ue-mcp"].args as string[]).find((a) => a.startsWith("ue-mcp@")),
   };
 }
 

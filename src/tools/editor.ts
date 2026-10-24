@@ -18,6 +18,7 @@ import { PLUGIN_UPGRADE_POINTER } from "../bridge/bridge.js";
 import { actions as epicActions, schema as epicSchema } from "./epic/editor.generated.js";
 import { specBp, schema as specSchema } from "./specs/editor.generated.js";
 import { batchAction, batchSchema } from "./editor/batch.js";
+import { checkpointActions, checkpointSchema } from "./checkpoints.js";
 
 /**
  * Which gate candidates dispatch to a bridge method the connected plugin does
@@ -255,6 +256,7 @@ export const editorTool: ToolDef = categoryTool(
     close_sequence: specBp("mutate", "Close the currently open Level Sequence editor (Sequencer). Do this before bulk-deleting actors a sequence may possess - open sequences re-resolve possessables by name during destruction and can mis-bind. Returns wasOpen + closedSequence (#718).", "close_sequence"),
     open_tab: specBp("mutate", "Open a registered editor tab by ID so its UI can be screenshotted as evidence (e.g. 'ProjectSettings', 'OutputLog', 'ContentBrowserTab1') (#727).", "open_tab"),
     open_settings: specBp("mutate", "Open (and navigate) a settings viewer for visual settings evidence. section takes a bare name with category, or a combined 'Engine.Physics' (#727).", "open_settings"),
+    show_notification: specBp("mutate", "Show a toast in the editor's notification area (bottom right), the way the editor reports a finished build or a failed save. severity picks the icon and colour (info default, success, warning, error); durationS is how long it stays before fading (default 8). hyperlinkText with hyperlinkUrl adds a link that opens the URL in the default browser; only http and https URLs are accepted. Returns onScreen, read back from the notification windows, so a toast Slate accepted but never drew is visible as onScreen=false.", "show_notification"),
     set_property: specBp("mutate", "Set UObject property. Saves the package to disk by default; pass save=false to leave it dirty in-memory (batch many writes, then editor(save_dirty)/asset(save)) (#674). TMap values take either { \"Key\": value } or, for struct keys, [{ key: {...}, value: ... }] - exactly what get_property/describe_object return under `value`. A write that cannot store every entry it was given fails and leaves the old value in place; containers report elementCount on success (#820). SkeletalMeshAsset/SkinnedAsset on a skinned mesh component go through SetSkinnedAssetAndUpdate, since a raw write crashes the next pose evaluation; for a placed actor use level(set_component_skeletal_mesh) (#1099). An Instanced or EditInlineNew object property takes {instanceClass, properties}: a new subobject of that class is created with the owning object as its outer and its fields set from properties, e.g. RootMotionModifier = {instanceClass: \"RootMotionModifier_Scale\", properties: {Scale: {x:0,y:0,z:0}}} (#1292).", "set_property"),
     get_property: specBp("read", "Read UObject property. propertyName takes the dotted, indexed (`Rules[1]`) and keyed (`Rules[Id=Axe]`) paths asset(set_property) does. `value` is structured JSON and is always safe to write straight back with set_property; `valueText` is UE export text and for a struct-keyed TMap does not read back, so valueTextRoundTrips reports whether it can be reused (#820).", "get_property"),
     describe_object: specBp("read", "Describe a UObject and optionally list/read properties. Per property, `value` is the round-trippable structured form and valueTextRoundTrips flags export text that is not (#820).", "describe_object"),
@@ -480,6 +482,7 @@ export const editorTool: ToolDef = categoryTool(
       },
     },
     batch: batchAction,
+    ...checkpointActions,
     ...epicActions,
   },
   {
@@ -507,5 +510,6 @@ export const editorTool: ToolDef = categoryTool(
     waitForAssetRegistry: z.boolean().optional().describe("play_in_editor / play_in_editor_ignore_blueprint_errors start: block until AssetRegistry finishes the initial scan (default true)"),
     assetRegistryTimeoutSeconds: z.number().optional().describe("play_in_editor / play_in_editor_ignore_blueprint_errors start: wait budget for the AssetRegistry scan (default 180s)"),
     className: z.string().optional().describe("invoke_static_function: reflected class declaring a static UFUNCTION - short name or /Script/Module.Class path. find_object: class to search for, including Blueprint generated classes (#802)"),
+    ...checkpointSchema,
   },
 );

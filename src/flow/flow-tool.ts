@@ -41,6 +41,7 @@ import {
 import { taskEffect } from "../surface/action-effects.js";
 import { LOCAL_ACTIONS } from "../dispatch/offline.js";
 import { EDITOR_OPERATION_TASKS } from "./editor-op-task.js";
+import { deriveFlowInputs } from "./flow-inputs.js";
 
 /**
  * Name a failed rollback by the bridge method it tried to call. Every record
@@ -99,7 +100,8 @@ export function createFlowTool(
       description:
         "Show a flow's execution plan without running a step of it. Params: flowName. Returns the ordered plan, "
         + "and the flow as declared under definition: its description and each step's task or nested flow, "
-        + "options and conditions, with ${steps.N...} references left unresolved.",
+        + "options and conditions, with ${steps.N...} references left unresolved. inputs lists the params a run may pass: "
+        + "each parameter the step tasks read and the steps leave unset, with its type, required flag and the steps that read it.",
       handler: async (ctx, params) => planFlow(registryFor(ctx), configFor(ctx), ctx, params),
     },
     list: {
@@ -198,7 +200,15 @@ async function planFlow(
   // The plan names each step's task; the definition carries what a reader needs to see how the
   // steps connect, which is the options and the ${steps.N...} references between them.
   const def = (config.flows as Record<string, FlowDefinition | undefined>)[flowName];
-  return def ? { ...planned, definition: { description: def.description, steps: def.steps } } : planned;
+  if (!def) return planned;
+  // What a run may pass in params, derived from the steps' task schemas (#1508).
+  const inputs = await deriveFlowInputs(flowName, {
+    flows: config.flows as Record<string, FlowDefinition>,
+    tasks: config.tasks as Record<string, TaskDefinition>,
+    registry,
+    tools: (ctx as FlowContext).getToolGraph?.() ?? ctx.session?.toolGraph ?? [],
+  });
+  return { ...planned, inputs, definition: { description: def.description, steps: def.steps, ...(def.options_scope ? { options_scope: def.options_scope } : {}) } };
 }
 
 async function runFlow(

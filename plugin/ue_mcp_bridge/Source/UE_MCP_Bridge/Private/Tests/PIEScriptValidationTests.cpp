@@ -295,4 +295,65 @@ bool FPIEScriptDraftRefusalTest::RunTest(const FString& /*Parameters*/)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPIEScriptDraftArrangeActTest,
+	"UE.MCP.PIE.Script.DraftChecks.ArrangeAct",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPIEScriptDraftArrangeActTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MCPPIEScriptDraftTests;
+
+	FScriptValidationContext Ctx = MakeContext();
+	Ctx.ResolveInputAction = [](const FString& Path) -> FScriptLookup
+	{
+		return Path == TEXT("/Game/Input/IA_Interact.IA_Interact") ? Found(EScriptValueKind::Boolean, TEXT("InputAction"))
+			: Missing(TEXT("no Input Action loads from that path"), { TEXT("/Game/Input/IA_Interact.IA_Interact") });
+	};
+	Ctx.ResolveActorClass = [](const FString& Path) -> FScriptLookup
+	{
+		return Path == TEXT("/Script/Engine.StaticMeshActor") ? Found(EScriptValueKind::Boolean, TEXT("class")) : Missing(TEXT("class not found"), {});
+	};
+
+	auto Parse = [this](const TCHAR* Json) -> TArray<FScriptStepDef>
+	{
+		TArray<FScriptStepDef> Steps;
+		TArray<FScriptStepIssue> ParseIssues;
+		TestTrue(TEXT("steps parse"), ParseScriptStepsJsonIssues(ParseJsonArray(Json), Steps, ParseIssues));
+		return Steps;
+	};
+
+	// The door script names only what the level and the project hold.
+	TArray<FScriptStepDef> Door = Parse(TEXT(
+		"[{\"instruction\":\"Open the door\",\"arrange\":[{\"kind\":\"set\",\"target\":\"Door\",\"path\":\"OpenAngle\",\"value\":0}],"
+		"\"act\":[{\"place\":{\"at\":\"Door\"}},{\"press\":{\"action\":\"/Game/Input/IA_Interact.IA_Interact\"}}],"
+		"\"expect\":{\"value\":\"Health\",\"op\":\"gt\",\"target\":1}}]"));
+	TestEqual(TEXT("a resolvable door script has no issues"), Check(Door, false, &Ctx).Num(), 0);
+
+	// An unknown actor, Input Action or class is refused at draft time, each with its field and candidates.
+	TArray<FScriptStepDef> Bad = Parse(TEXT(
+		"[{\"instruction\":\"x\",\"arrange\":[{\"kind\":\"set\",\"target\":\"Dor\",\"path\":\"OpenAngle\",\"value\":0},{\"kind\":\"spawn\",\"class\":\"/Game/Nope.Nope_C\"}],"
+		"\"act\":[{\"place\":{\"at\":\"Dor\"}},{\"press\":{\"action\":\"/Game/Input/IA_Interac\"}}],"
+		"\"expect\":{\"value\":\"Health\",\"op\":\"gt\",\"target\":1}},"
+		"{\"instruction\":\"y\",\"judge\":\"manual\",\"act\":[{\"inject\":{\"action\":\"/Game/Input/IA_Missing\",\"value\":1}}]}]"));
+	const TArray<FScriptStepIssue> Issues = Check(Bad, false, &Ctx);
+	TestTrue(TEXT("unknown arrange target"), HasIssue(Issues, 0, TEXT("arrange[0].target")));
+	TestTrue(TEXT("unknown spawn class"), HasIssue(Issues, 0, TEXT("arrange[1].class")));
+	TestTrue(TEXT("unknown place actor"), HasIssue(Issues, 0, TEXT("act[0].place.at")));
+	TestTrue(TEXT("unknown pressed action"), HasIssue(Issues, 0, TEXT("act[1].press.action")));
+	TestTrue(TEXT("a manual step's act is checked too"), HasIssue(Issues, 1, TEXT("act[0].inject.action")));
+	const FScriptStepIssue* PlaceIssue = Issues.FindByPredicate([](const FScriptStepIssue& I) { return I.Field == TEXT("act[0].place.at"); });
+	TestTrue(TEXT("the actor issue offers the level's actors"), PlaceIssue && PlaceIssue->Candidates.Contains(TEXT("Door")));
+	TestTrue(TEXT("the message starts with the step and field"), PlaceIssue && PlaceIssue->Message.StartsWith(TEXT("steps[0].act[0].place.at:")));
+
+	// resolve_in_pie defers the actors, never the assets.
+	TArray<FScriptStepDef> Deferred = Parse(TEXT(
+		"[{\"instruction\":\"x\",\"resolve_in_pie\":true,\"act\":[{\"place\":{\"at\":\"BP_Spawned_C_0\"}},{\"press\":{\"action\":\"/Game/Input/IA_Missing\"}}],"
+		"\"expect\":{\"value\":\"Health\",\"op\":\"gt\",\"target\":1}}]"));
+	const TArray<FScriptStepIssue> DeferredIssues = Check(Deferred, false, &Ctx);
+	TestFalse(TEXT("a deferred actor is not resolved"), HasIssue(DeferredIssues, 0, TEXT("act[0].place.at")));
+	TestTrue(TEXT("a missing Input Action is still refused"), HasIssue(DeferredIssues, 0, TEXT("act[1].press.action")));
+	return true;
+}
+
 #endif

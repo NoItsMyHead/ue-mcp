@@ -267,7 +267,7 @@ Every step put to a form is never put to a form again in the same run, whatever 
 
 ### Event types
 
-`script.run_started`, `script.step_started`, `script.step_passed`, `script.step_failed`, `script.verdict_requested`, `script.verdict`, `script.run_finished`. `script.verdict_requested` is the editor's `awaiting_verdict`; the others keep the editor's names. A client ignores any other `script.*` type it does not know.
+`script.run_started`, `script.step_started`, `script.step_acted`, `script.step_passed`, `script.step_failed`, `script.verdict_requested`, `script.verdict`, `script.run_finished`. `script.verdict_requested` is the editor's `awaiting_verdict`; the others keep the editor's names. A client ignores any other `script.*` type it does not know.
 
 ### Common fields
 
@@ -283,7 +283,7 @@ Every step put to a form is never put to a form again in the same run, whatever 
 
 ### Step object
 
-Carried as `step` by `step_started`, `step_passed`, `step_failed` and `verdict`:
+Carried as `step` by `step_started`, `step_acted`, `step_passed`, `step_failed` and `verdict`:
 
 | Field | Type | |
 |---|---|---|
@@ -291,7 +291,9 @@ Carried as `step` by `step_started`, `step_passed`, `step_failed` and `verdict`:
 | `instruction` | string | |
 | `judge` | `"auto"` \| `"manual"` | |
 | `expect` | object? | `{ value: string, op: "decreasing"\|"increasing"\|"eq"\|"gt"\|"lt"\|"visible"\|"exists", target?: number\|boolean, within_ms?: integer }` |
-| `status` | string | The step's status after this event: `running` (or `awaiting_verdict` for a manual step) on `step_started`, `passed` on `step_passed`, `failed` on `step_failed`, and `passed`, `failed` or `skipped` on `verdict`. |
+| `arrange`, `act` | array? | The step's arrange and act entries (section 5.3). |
+| `actResult` | object? | What arrange and act did, the step's `act_result` (section 4). |
+| `status` | string | The step's status after this event: `running` (or `awaiting_verdict` for a manual step without `arrange` or `act`) on `step_started`, `running` on `step_acted` (`failed` when the act failed), `passed` on `step_passed`, `failed` on `step_failed`, and `passed`, `failed` or `skipped` on `verdict`. |
 | `agentJudgeable` | boolean? | Manual steps: whether an agent verdict is accepted. |
 | `evidence` | object? | The editor's evidence object for an auto step with `expect`: `{ value, at_start, at_end, samples, observed, verdict_frame?, verdict_at_ms?, reason? }`. On a manual step, the verdict's `{ note, captures? }`. |
 | `note` | string? | |
@@ -305,6 +307,7 @@ Fields the event itself does not carry are filled from the status the server rea
 |---|---|
 | `script.run_started` | `resultsPath?: string` |
 | `script.step_started` | `step` |
+| `script.step_acted` | `step`, carrying `actResult`. Once per step with `arrange` or `act`, when they end, done or failed, on a full run. |
 | `script.step_passed` | `step` |
 | `script.step_failed` | `step` |
 | `script.verdict_requested` | `awaiting: Array<{ index: integer, instruction: string }>` |
@@ -445,6 +448,8 @@ Written to `<Project>/Saved/MCPObservations/<run_id>/results.json`, beside the o
 | `steps[].note` | string? | |
 | `steps[].verdict_source` | `auto` \| `action` \| `elicitation` \| `agent` \| `source_run` | Absent until the step settles. `action` and `elicitation` are a person's verdicts, `agent` an agent's. |
 | `steps[].agent_judgeable` | boolean? | Manual steps only. |
+| `steps[].arrange`, `steps[].act` | array? | As the step was written (section 5.3). Absent when empty. |
+| `steps[].act_result` | object? | Steps with `arrange` or `act`: `{ status: "running"\|"done"\|"failed"\|"skipped", reason?, arranged, actions: [{ index, action, ok, error?, at_ms }], started_at_ms, ended_at_ms, duration_ms, wall_ms, captures? }`. `action` is the entry's verb (`place`, `press`, `wait_ms`, ...). Times are game ms from the observer's first frame, `wall_ms` wall time. A `skipped` one (a manual run, a replay) carries only `status` and `reason`. |
 
 Replay runs add to each step:
 
@@ -452,19 +457,22 @@ Replay runs add to each step:
 |---|---|---|
 | `source_status` | step status | The step's status in the source run. |
 | `regression` | boolean | `true` when it passed in the source run and failed in the replay. |
-| `window_start_ms`, `window_end_ms` | number? | Auto steps the source run reached: the source `started_at_ms` plus `replay_offset_ms`, and that plus `within_ms`. |
+| `window_start_ms`, `window_end_ms` | number? | Auto steps the source run reached: the source `started_at_ms` (or, for a step that acted, the source `act_result.ended_at_ms`) plus `replay_offset_ms`, and that plus `within_ms`. |
+
+A replay does not run `arrange` or `act` again: the recording replays the input. Each step that has them carries `act_result` with `status: "skipped"`.
 
 On a replay, manual steps carry the source verdict, note and evidence with `verdict_source: "source_run"`, or are `skipped` with reason `no verdict in the source run`. An auto step the source run never reached is `skipped` with reason `not reached in the source run`.
 
 ## 5. Step format (script_create, script_update, inline steps)
 
 ```json
-{ "instruction": "string", "judge": "auto | manual", "agent_judgeable": true, "resolve_in_pie": false, "expect": { "value": "string", "op": "decreasing | increasing | eq | gt | lt | visible | exists", "target": 0, "within_ms": 3000 } }
+{ "instruction": "string", "judge": "auto | manual", "agent_judgeable": true, "resolve_in_pie": false, "arrange": [], "act": [], "expect": { "value": "string", "op": "decreasing | increasing | eq | gt | lt | visible | exists", "target": 0, "within_ms": 3000 } }
 ```
 
 - `instruction` is required. `judge` defaults to `auto`.
 - `agent_judgeable` applies to manual steps and defaults to `true`; `false` makes `pie(verdict)` refuse `source: "agent"` for the step. It is refused on an auto step. `script_read` and results write it on every manual step.
-- `resolve_in_pie` defaults to `false` and applies to a step with `expect`; it is refused on a step without one. `true` says `expect.value` only resolves once PIE is running (an actor spawned during play, a widget created at run time), so `script_create` and `script_update` do not resolve it (5.1). `script_read` and results write it only when `true`.
+- `resolve_in_pie` defaults to `false` and applies to a step with `expect`, `arrange` or `act`; it is refused on a step with none of them. `true` says `expect.value`, and the actors `arrange` and `act` name, only resolve once PIE is running (an actor spawned during play, a widget created at run time), so `script_create` and `script_update` do not resolve them (5.1).
+- `arrange` and `act` are optional arrays (5.3). `within_ms` counts from the end of `act`. `script_read` and results write it only when `true`.
 - A manual step with `expect` is refused. An auto step without `expect` passes when it starts.
 - `target` is required for `eq`, `gt` and `lt`, refused for `decreasing` and `increasing`, and defaults to `true` for `visible` and `exists`. It is a number or a boolean; `script_read` and results write it back as a number for `eq`, `gt` and `lt`, and as a boolean for `visible` and `exists`.
 - `within_ms` 0 or absent uses the run's `default_within_ms`.
@@ -482,6 +490,7 @@ Storage actions: `script_create { name, steps, package_path?, description?, prof
   - A step with `resolve_in_pie: true` is not resolved.
 - **`op` and `target`** are checked against the value's type. A bool takes only `eq`, with target `true` or `false` (or 1 or 0). An enum takes only `eq`, with a target that is one of its values. A number takes a number target, never `true` or `false`. An integer is refused a fractional `eq` target, an `eq` target outside its range, and a `gt` or `lt` target it can never pass. `visible` and `exists` take target `true` or `false` (or 1 or 0).
 - **Auto steps.** A script needs at least one auto step with an `expect`, unless it sets `manual_only: true`. The flag is stored on the script.
+- **`arrange` and `act`**: the actor each `set`, `call` and `place.at` names (as `exists` resolves one), the actor class each `spawn` names, and the Input Action each `press`, `inject`, `hold` and `tape` names (an object path that loads as one). Fields are `arrange[<j>].target`, `arrange[<j>].class`, `act[<j>].place.at` and `act[<j>].<verb>.action`. `resolve_in_pie: true` skips the actors, never the classes or Input Actions.
 - The profile must exist.
 
 A refusal lists every problem it found, so a client can hand the list back to the agent that drafted the script:
@@ -501,7 +510,7 @@ A refusal lists every problem it found, so a client can hand the list back to th
 | Field | Type | |
 |---|---|---|
 | `step` | integer \| null | 0-based step index, or `null` for a problem with the script as a whole (`steps`, `profile`). |
-| `field` | string | The step field at fault: `instruction`, `judge`, `agent_judgeable`, `resolve_in_pie`, `expect`, `expect.value`, `expect.op`, `expect.target`, `expect.within_ms`; or `steps` or `profile` for the script. Empty when the step is not an object. |
+| `field` | string | The step field at fault: `instruction`, `judge`, `agent_judgeable`, `resolve_in_pie`, `expect`, `expect.value`, `expect.op`, `expect.target`, `expect.within_ms`, `arrange`, `act` (an entry that does not parse), `arrange[<j>].target`, `arrange[<j>].class`, `act[<j>].place.at`, `act[<j>].<verb>.action`; or `steps` or `profile` for the script. Empty when the step is not an object. |
 | `message` | string | What is wrong, starting `steps[<i>].<field>:` for a step problem. |
 | `candidates` | string[]? | Closest valid replacements, best first: property paths, actor labels, widget names, ops, enum values as `"<value> (<name>)"`, profile paths, or `manual_only` for a script with no auto step. Absent when there are none. |
 
@@ -514,6 +523,46 @@ A refusal lists every problem it found, so a client can hand the list back to th
 The model is a daemon extension's provider (section 6), else `ANTHROPIC_API_KEY`. With neither, the agent step fails with `No model is configured for flow agent steps.`
 
 `error` joins every `message` with ` | `. Parse problems (a missing `instruction`, an unknown `op`, a missing `target`) come in the same list, one per step, and the steps that parsed are still checked.
+
+### 5.3 arrange and act
+
+A step sets up and drives what it then checks. Both run in the PIE world the run observes (the server's, in a multiplayer session), through the code that already runs them elsewhere: `arrange` through a scenario's arrange (`scenario_validate`), `act` through the step actions `pie(uat_run)` runs in a step's `do`. There is no second implementation of either.
+
+```json
+{
+  "instruction": "Open the door",
+  "arrange": [{ "kind": "set", "target": "Door", "path": "OpenAngle", "value": 0 }],
+  "act": [{ "place": { "at": "Door", "offset": [-150, 0, 0] } }, { "press": { "action": "/Game/Input/IA_Interact.IA_Interact" } }],
+  "expect": { "value": "Door.OpenAngle", "op": "gt", "target": 80 }
+}
+```
+
+| `arrange` entry | |
+|---|---|
+| `{ kind: "spawn", class, at?: [x,y,z], rotation?: [pitch,yaw,roll], scale?: [x,y,z] }` | Spawns a native class or a Blueprint (path with or without `_C`). |
+| `{ kind: "set", target, path, value }` | Sets a property on an actor by dotted path. |
+| `{ kind: "call", target, func, args?: [] }` | Calls a function on an actor, arguments by position. |
+
+`target` is an actor's label, name or class.
+
+| `act` entry | |
+|---|---|
+| `{ client?, place: { at, offset?: [x,y,z], face?: true } }` or `{ client?, place: { location: [x,y,z], yaw? } }` | Teleports the player's pawn next to an actor (offset in its frame, facing it) or to a spot, else the nearest free spot within 360 units. |
+| `{ client?, press: { action, frames?: 4 } }` | Holds an Input Action for `frames` frames, then releases it. |
+| `{ client?, inject: { action, value } }` | One frame of an Input Action. |
+| `{ client?, hold: { action, value, ms } }` | Holds an Input Action for `ms` wall milliseconds. |
+| `{ client?, tape: { action, values: [] } }` | Plays a per-frame value array at 60 Hz. |
+| `{ client?, console: "cmd" }` | Runs a console command. |
+| `{ client?, capture: "label" \| true }` | Saves the player's view to `<output_dir>/captures/step<NN>_client<C>_<label>.jpg`. |
+| `{ wait_ms }` | Waits before the next entry. |
+
+`client` is 0 (the editor's own player, the default) or a remote player 1..N. `action` is an Input Action object path; `value` is a number, a boolean or `[x, y, z]`.
+
+- **Order and timing.** On the frame a step starts: `arrange` runs, then `act` starts. The step holds the run until `act` ends: every entry ran, every `press`, `hold` and `tape` on the editor's player played out, every remote player confirmed what it was sent (up to 10 s), and every capture was written. Then the `expect` window opens and `within_ms` counts from there. `evidence.verdict_at_ms` counts from there too.
+- **Manual steps** may carry `arrange` and `act`. The step reports `running` while they run, refuses `pie(verdict)` until they end, then turns `awaiting_verdict`. A manual step with `arrange` or `act` begins its own block of manual steps.
+- **Failure.** An arrange entry that cannot apply, or an act entry that cannot run, fails the step with `evidence.reason` naming it (`act[1] could not run: InputAction /Game/Input/IA_Interact.IA_Interact not found`), and the run moves on. A run that ends mid act fails the act and the step.
+- **Manual runs** (1.8) and **replays** do not run `arrange` or `act`; the step's `act_result` is `skipped` with the reason.
+- **Reporting.** `step_acted` (section 3) and `steps[].act_result` (section 4) carry what each entry did and how long the act took.
 
 ## 6. A daemon extension
 

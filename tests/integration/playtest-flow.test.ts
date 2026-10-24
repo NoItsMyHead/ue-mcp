@@ -95,7 +95,7 @@ describe("the playtest flow", () => {
       const asked = fs.readFileSync(prompts, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Json);
       expect(asked.length).toBe(2);
       expect(asked.every((a) => a.tools === 0)).toBe(true);
-      expect(asked[0].apiVersion).toBe(2);
+      expect(asked[0].apiVersion).toBe(3);
       expect(asked[0].features).toContain("models.provider");
       expect(String(asked[0].prompt)).toContain(BP);
       expect(String(asked[0].prompt)).toContain("taking damage");

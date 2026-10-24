@@ -9,6 +9,7 @@
 export type ScriptEventType =
   | "run_started"
   | "step_started"
+  | "step_acted"
   | "step_passed"
   | "step_failed"
   | "verdict_requested"
@@ -48,6 +49,14 @@ export interface ScriptStep {
   /** Replay runs: the step's status in the source run, and whether it passed there and fails here. */
   sourceStatus?: ScriptStepStatus;
   regression?: boolean;
+  /** Run when the step starts, before the expect window opens: a scenario's arrange entries, then uat_run's step actions. */
+  arrange?: Array<Record<string, unknown>>;
+  act?: Array<Record<string, unknown>>;
+  /**
+   * What arrange and act did: {status: running|done|failed|skipped, reason?, arranged, actions: [{index, action, ok, error?, at_ms}],
+   * started_at_ms, ended_at_ms, duration_ms, wall_ms, captures?}. A skipped one carries only status and reason.
+   */
+  actResult?: Record<string, unknown>;
 }
 
 export interface ScriptSummary {
@@ -85,7 +94,7 @@ interface ScriptEventBase {
 
 export type ScriptEvent =
   | (ScriptEventBase & { type: "run_started"; resultsPath?: string })
-  | (ScriptEventBase & { type: "step_started" | "step_passed" | "step_failed" | "verdict"; step: ScriptStep })
+  | (ScriptEventBase & { type: "step_started" | "step_acted" | "step_passed" | "step_failed" | "verdict"; step: ScriptStep })
   | (ScriptEventBase & { type: "verdict_requested"; awaiting: Array<{ index: number; instruction: string }> })
   | (ScriptEventBase & {
       type: "run_finished";

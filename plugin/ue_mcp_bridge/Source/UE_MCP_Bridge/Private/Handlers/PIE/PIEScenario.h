@@ -34,6 +34,10 @@ namespace MCPPIE
 		// message per problem; returns true iff OutErrors is empty.
 		static bool Validate(const FScenario& S, TArray<FString>& OutErrors);
 
+		// The arrange checks Validate applies, for arrange steps outside a scenario (a test script step's).
+		// Each message starts with Where, then [i].
+		static void ValidateArrange(const TArray<TSharedPtr<FJsonValue>>& Arrange, const FString& Where, TArray<FString>& OutErrors);
+
 		static TSharedRef<FJsonObject> ToJson(const FScenario& S);
 
 		// Execute the arrange steps against a live PIE world. Live PIE required.

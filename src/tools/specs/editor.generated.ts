@@ -3325,6 +3325,56 @@ export const handlerSpecs: HandlerSpecs = {
       }
     ]
   },
+  "show_notification": {
+    "category": "editor",
+    "params": [
+      {
+        "name": "text",
+        "type": "string",
+        "required": true,
+        "description": "Headline of the toast"
+      },
+      {
+        "name": "subText",
+        "type": "string",
+        "required": false,
+        "description": "Second line under the headline"
+      },
+      {
+        "name": "durationS",
+        "type": "number",
+        "required": false,
+        "description": "Seconds before the toast fades (default 8)",
+        "minimum": 1,
+        "maximum": 600
+      },
+      {
+        "name": "severity",
+        "type": "string",
+        "required": false,
+        "description": "Icon and colour of the toast (default info)",
+        "enum": [
+          "info",
+          "success",
+          "warning",
+          "error"
+        ]
+      },
+      {
+        "name": "hyperlinkText",
+        "type": "string",
+        "required": false,
+        "description": "Link label on the toast. Needs hyperlinkUrl"
+      },
+      {
+        "name": "hyperlinkUrl",
+        "type": "string",
+        "required": false,
+        "description": "http or https URL the link opens in the default browser"
+      }
+    ],
+    "contractExempt": "shows an editor toast"
+  },
   "stage_game_input": {
     "category": "editor",
     "params": [
@@ -3631,6 +3681,7 @@ export const paramsClauses: Readonly<Record<string, string>> = {
   set_viewport_camera: "Params: location?, rotation?, projection?, viewportType?, orthoZoom?",
   set_viewport_exposure: "Params: ev100?, fixed?, mode?, viewportIndex?",
   set_viewport_view: "Params: fov?, nearClip?, farClip?, viewportType?, cameraSpeed?, viewportIndex?",
+  show_notification: "Params: text, subText?, durationS?, severity?, hyperlinkText?, hyperlinkUrl?",
   stage_game_input: "Params: inputMode?, showMouseCursor?",
   start_insights_trace: "Params: channels?, traceTarget?, file?, host?, truncate?, excludeTail?",
   stop_insights_trace: "Params: none",
@@ -3703,6 +3754,7 @@ export const schema: Record<string, z.ZodType> = {
   disable: z.union([z.array(z.string()), z.string()]).optional().describe("Channels to turn off, as an array or a comma-separated string"),
   discardUnsaved: z.boolean().optional().describe("For a map: switch even though the open map has unsaved changes, discarding them (default false)"),
   dryRun: z.boolean().optional().describe("Report the targets without touching them (default TRUE; pass false to apply)"),
+  durationS: z.number().min(1).max(600).optional().describe("Seconds before the toast fades (default 8)"),
   enable: z.union([z.array(z.string()), z.string()]).optional().describe("Channels to turn on, as an array or a comma-separated string"),
   enabled: z.boolean().optional().describe("true (default) ejects the debug camera if needed and poses it; false returns control to the player (pose_debug_camera). Hide editor-only overlays (default true); false shows them again (set_game_view). Realtime update on every level viewport (default true) (set_realtime)"),
   enabledOnly: z.boolean().optional().describe("Only channels that are currently on (default false)"),
@@ -3735,6 +3787,8 @@ export const schema: Record<string, z.ZodType> = {
   hidden: z.boolean().optional().describe("true hides the target, false shows it"),
   hitchMilliseconds: z.number().optional().describe("How long to stall the game thread (default 250, max 5000)"),
   host: z.string().optional().describe("Trace server for traceTarget=network (default 127.0.0.1)"),
+  hyperlinkText: z.string().optional().describe("Link label on the toast. Needs hyperlinkUrl"),
+  hyperlinkUrl: z.string().optional().describe("http or https URL the link opens in the default browser"),
   ignoreActors: z.array(z.string()).optional().describe("Actor labels to skip"),
   includeChildren: z.boolean().optional().describe("Also retarget the binding's component possessables to the new actor's components (default true)"),
   includeContent: z.boolean().optional().describe("Include content packages (default true)"),
@@ -3836,7 +3890,7 @@ export const schema: Record<string, z.ZodType> = {
   sectionIndex: z.number().int().optional().describe("Section index on the track (default 0) (get_sequence_channel_keys, set_sequence_channel_keys). Index of the section to remove, as get_sequence_info lists them (remove_sequence_section). Target section index (default 0) (set_sequence_keyframes)"),
   sequenceAction: z.string().optional().describe("play (default) | pause | stop"),
   sequencePath: z.string().optional().describe("Level Sequence asset path (add_sequence_section, get_sequence_channel_keys, rebind_possessable, remove_sequence_section, resolve_sequence_bindings, set_sequence_channel_keys, set_sequence_keyframes, set_sequence_playback_range). Report only actors playing this sequence (get_sequence_runtime_bindings). Level Sequence to open and drive; omit to drive the one already open (play_sequence). Level Sequence to render (render_sequence_frames). Level Sequence to open and scrub; omit to scrub the one already open (scrub_sequence)"),
-  severity: z.string().optional().describe("Severity-name substring: Error | Warning | PerformanceWarning | Info"),
+  severity: z.string().optional().describe("Severity-name substring: Error | Warning | PerformanceWarning | Info (get_message_log). Icon and colour of the toast (default info) (show_notification)"),
   showMouseCursor: z.boolean().optional().describe("Show the mouse cursor (default false for gameOnly, true otherwise)"),
   space: z.string().optional().describe("world (default) | component"),
   startFrame: z.number().optional().describe("First display frame to render. Not with startSeconds"),
@@ -3844,10 +3898,12 @@ export const schema: Record<string, z.ZodType> = {
   steps: z.number().int().optional().describe("How many steps to apply (default 1)"),
   stopMovement: z.boolean().optional().describe("Stop the movement component so the move is not undone (default true)"),
   subsystemClass: z.string().optional().describe("Subsystem class name or /Script path, with target=subsystem: world, game instance, local player (by playerIndex), engine or editor"),
+  subText: z.string().optional().describe("Second line under the headline"),
   sweep: z.boolean().optional().describe("Collide on the way (default false)"),
   tabId: z.string().optional().describe("Registered editor tab id, e.g. ProjectSettings, OutputLog or ContentBrowserTab1"),
   target: z.string().optional().describe("auto (default) | pie | editor | window (capture_screenshot). gameinstance | gamemode | gamestate | playercontroller | playerpawn | subsystem (get_object_properties, invoke_object_function, set_object_property)"),
   templateLevel: z.string().optional().describe("Level to copy; omit, Empty or None for a blank level"),
+  text: z.string().optional().describe("Headline of the toast"),
   timeUnit: z.string().optional().describe("How to read frame: display (default, the frame numbers Sequencer shows) | tick (the units get_sequence_info's playbackRange reports)"),
   traceFile: z.string().optional().describe(".utrace path for the standalone process to write"),
   traceTarget: z.string().optional().describe("file (default, writes a .utrace) | network (streams to a trace server) | none (memory only)"),

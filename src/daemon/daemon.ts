@@ -12,6 +12,7 @@
  *   POST /v1/update/apply  install it, now or when the editor exits
  *   POST /v1/shutdown   exit now
  *   POST /v1/handoff    exit once no call is in flight (a newer daemon is taking over)
+ *   /v1/checkpoints     checkpoints per editor session, see checkpoint-routes.ts
  *   WS   /v1/mcp        one MCP session per socket
  */
 import * as fs from "node:fs";
@@ -51,7 +52,10 @@ import { EXTENSION_API_VERSION, type DaemonExtensionApi, type DaemonHealth, type
 import { existingGuard, onDialogEvent } from "../editor/dialog-guard.js";
 
 /** What this daemon's extension API offers beyond its version number. */
-export const EXTENSION_FEATURES: readonly string[] = ["callAction.dialogPrompt", "callAction.elicit", "events.dialog", "events.script", "models.provider", "modes"];
+export const EXTENSION_FEATURES: readonly string[] = ["callAction.dialogPrompt", "callAction.elicit", "checkpoints", "events.dialog", "events.script", "models.provider", "modes"];
+
+/** What this daemon's HTTP API offers beyond DAEMON_API_VERSION, reported by /v1/health. */
+export const DAEMON_FEATURES: readonly string[] = ["checkpoints"];
 import { loadExtensions, matchRoute, normalizeResponse, type LoadedExtension } from "./extensions.js";
 import { UiBundleStore, contentType } from "./ui-bundles.js";
 import { collectStatus } from "../cli/status.js";
@@ -63,6 +67,8 @@ import { subscribeScriptEvents } from "../pie/script-events.js";
 import { stopAllScriptWatches } from "../pie/script-watch.js";
 import { pluginRoutes } from "./plugin-routes.js";
 import { releaseStartLock, waitForStartTurn } from "./start-lock.js";
+import { checkpointRoute } from "./checkpoint-routes.js";
+import { checkpointsFor, subscribeCheckpointEvents } from "../checkpoints/service.js";
 
 const DEFAULT_IDLE_MS = 30 * 60_000;
 const DEFAULT_WAIT_FOR_EDITOR_SECONDS = 60;
@@ -252,6 +258,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   const unsubscribeScripts = subscribeScriptEvents(({ type, ...data }) => {
     events.publish(`script.${type}`, data as unknown as Record<string, unknown>);
   });
+  // Checkpoints: checkpoint.created and checkpoint.restored for one checkpoint, checkpoints.* for the history.
+  const unsubscribeCheckpoints = subscribeCheckpointEvents((e) => {
+    const type = e.type === "created" || e.type === "restored" ? `checkpoint.${e.type}` : `checkpoints.${e.type}`;
+    events.publish(type, e.data as unknown as Record<string, unknown>);
+  });
 
   for (const s of rt.sessions.list()) follow(s);
   rt.onSurfaceChanged(() => {
@@ -345,6 +356,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     lastEventId: events.lastId,
     extensions: extensions.map((x) => ({ name: x.name, version: x.version })),
     ui: ui.active()?.manifest.version ?? null,
+    features: DAEMON_FEATURES,
   });
   const editors = (): EditorState[] => rt.sessions.list().map((s) => states.get(s) ?? {
     name: s.name, connected: s.bridge.isConnected, port: s.bridge.port, pid: null, lastDisconnect: null,
@@ -447,6 +459,21 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       setFeedback: (mode) => setFeedbackMode(mode, projectDir),
       setDialog: (mode) => setDialogMode(mode, projectDir),
     },
+    checkpoints: (() => {
+      const of = (editor?: string) => {
+        const session = editor ? rt.sessions.find(editor) : rt.sessions.active;
+        if (!session) throw new Error(`No editor session '${editor}'`);
+        return checkpointsFor(session);
+      };
+      return {
+        state: (o) => of(o?.editor).state(o?.limit),
+        setEnabled: (enabled, o) => of(o?.editor).setEnabled(enabled),
+        create: (label, o) => of(o?.editor).create(label),
+        changes: (from, to, o) => of(o?.editor).changes(from, to ?? null),
+        restore: (checkpoint, o) => of(o?.editor).restore(checkpoint, { paths: o?.paths, force: o?.force }),
+        clear: (o) => of(o?.editor).clear(),
+      };
+    })(),
     registryAccount: async () => {
       const auth = await readRegistryAuth();
       return auth ? { login: auth.login, token: auth.token, registry: auth.registry } : null;
@@ -608,6 +635,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
         .then((r) => (r ? json(res, r.status, r.body) : void res.writeHead(404).end()), (e) => json(res, 500, { error: e instanceof Error ? e.message : String(e) }));
       return;
     }
+    if (url.pathname === "/v1/checkpoints" || url.pathname.startsWith("/v1/checkpoints/")) {
+      const sub = url.pathname.slice("/v1/checkpoints".length).replace(/\/+$/, "");
+      readBody(req)
+        .then((body) => checkpointRoute(rt.sessions, req.method ?? "GET", sub, url.searchParams, body))
+        .then((r) => (r ? json(res, r.status, r.body) : void res.writeHead(404).end()), (e) => json(res, 500, { error: e instanceof Error ? e.message : String(e) }));
+      return;
+    }
     if (url.pathname === "/v1/flows" || url.pathname.startsWith("/v1/flows/")) {
       const sub = url.pathname.slice("/v1".length).replace(/\/+$/, "");
       handleFlowRoute(rt.flowTool, rt.baseCtx, req, res, sub, url).then(
@@ -669,6 +703,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       for (const t of updateTimers) clearTimeout(t);
       unsubscribeFlows();
       unsubscribeScripts();
+      unsubscribeCheckpoints();
       stopAllScriptWatches();
       unsubscribeDialogs();
       for (const x of extensions) await Promise.resolve(x.dispose?.()).catch((e) => warn("extension", `${x.name} dispose failed`, e));

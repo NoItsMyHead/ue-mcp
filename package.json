@@ -1,7 +1,7 @@
 {
   "name": "ue-mcp",
   "version": "1.4.11-beta.3",
-  "description": "Unreal Engine MCP server - 30 tools, 2103+ actions for AI-driven editor control",
+  "description": "Unreal Engine MCP server - 30 tools, 2109+ actions for AI-driven editor control",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -102,6 +102,7 @@
     "@anthropic-ai/sdk": "0.133.0",
     "@db-lyon/flowkit": "^0.18.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "isomorphic-git": "1.44.2",
     "js-yaml": "^4.1.0",
     "ws": "^8.18.0",
     "zod": "^4.6.7"
@@ -112,6 +113,7 @@
     "@types/ws": "^8.5.0",
     "husky": "^9.1.7",
     "node-pty": "^1.1.0",
+    "npm": "11.21.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"

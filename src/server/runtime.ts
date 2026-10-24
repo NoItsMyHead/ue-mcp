@@ -33,6 +33,7 @@ import { registeredUnion } from "../surface/registered-surface.js";
 import { packageVersion } from "../core/package-root.js";
 import { SessionLoads, type SessionLoad } from "../sessions/session-load.js";
 import type { ContextStrategy } from "../surface/context/lean-context.js";
+import { checkpointsFor } from "../checkpoints/service.js";
 
 export interface Runtime {
   sessions: SessionRegistry;
@@ -154,6 +155,8 @@ export async function createRuntime(projectArgs: string[]): Promise<Runtime> {
     // BEFORE the surface build, so the first call this server makes to an
     // editor already has a guard behind it.
     dialogGuardFor(session);
+    // Before any bridge connects, so the first connect arms save recording when checkpoints are on.
+    checkpointsFor(session);
     await loads.buildSurface(session);
   }
 
@@ -197,6 +200,7 @@ export async function createRuntime(projectArgs: string[]): Promise<Runtime> {
   sessions.prepareSession = async (session) => {
     await loads.ensure(session);
     dialogGuardFor(session);
+    checkpointsFor(session);
   };
   for (const session of sessions.list()) {
     if (session.guards.size === 0) continue;

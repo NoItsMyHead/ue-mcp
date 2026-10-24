@@ -5,7 +5,11 @@
 #include "Handlers/PIE/PIEInputRecorder.h"
 #include "Handlers/PIE/PIEInputReplayer.h"
 #include "Handlers/PIE/PIESequenceFormat.h"
+#include "Handlers/PIE/PIEScenario.h"
+#include "Handlers/PIE/PIEStepActions.h"
+#include "Handlers/PIE/PIERemotePlayers.h"
 #include "Handlers/PIE/PIELog.h"
+#include "MCPPIERemoteControl.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "HAL/FileManager.h"
@@ -15,6 +19,7 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 
 namespace MCPPIE
 {
@@ -37,6 +42,10 @@ namespace MCPPIE
 
 		const TCHAR* ScriptRunStateNames[] = {
 			TEXT("idle"), TEXT("armed"), TEXT("running"), TEXT("awaiting_verdict"), TEXT("finished"), TEXT("stopped")
+		};
+
+		const TCHAR* ScriptActStateNames[] = {
+			TEXT("none"), TEXT("running"), TEXT("done"), TEXT("failed"), TEXT("skipped")
 		};
 
 		TArray<TSharedPtr<FJsonValue>> ScriptStringsToJson(const TArray<FString>& Values)
@@ -128,7 +137,7 @@ namespace MCPPIE
 			St.EndedAt = ScriptNowIso();
 			St.VerdictSource = TEXT("auto");
 			St.Evidence.VerdictFrame = Run.Frame;
-			St.Evidence.VerdictAtMs = St.StartedAtMs >= 0.0 ? Run.NowMs - St.StartedAtMs : 0.0;
+			St.Evidence.VerdictAtMs = St.StartedAtMs >= 0.0 ? Run.NowMs - St.ExpectFromMs() : 0.0;
 			St.Evidence.Reason = Reason;
 			if (Status == EScriptStepStatus::Failed && St.bHasSourceStatus
 				&& St.SourceStatus == EScriptStepStatus::Passed)
@@ -140,13 +149,21 @@ namespace MCPPIE
 			AddScriptEvent(Run, Status == EScriptStepStatus::Passed ? TEXT("step_passed") : TEXT("step_failed"), Index, D);
 		}
 
+		// Whether this run runs the step's arrange and act. A manual run has no PIE, and a replay replays the recorded input.
+		bool ScriptStepActs(const FScriptRun& Run, int32 Index)
+		{
+			return Run.Steps[Index].Def.HasArrangeOrAct() && !Run.bManualMode && !Run.bReplay;
+		}
+
 		void ScriptStartStep(FScriptRun& Run, int32 Index)
 		{
 			FScriptStepRun& St = Run.Steps[Index];
+			const bool bActs = ScriptStepActs(Run, Index);
 			St.StartedAtMs = Run.NowMs;
 			St.StartedAt = ScriptNowIso();
 			St.WithinMs = ScriptEffectiveWithinMs(St.Def, Run.DefaultWithinMs);
-			St.Status = St.Def.Judge == EScriptJudge::Manual ? EScriptStepStatus::AwaitingVerdict : EScriptStepStatus::Running;
+			// A manual step that acts asks for its verdict once the act has set the scene.
+			St.Status = St.Def.Judge == EScriptJudge::Manual && !bActs ? EScriptStepStatus::AwaitingVerdict : EScriptStepStatus::Running;
 			if (St.Def.bHasExpect) St.Evidence.Value = St.Def.Expect.Value;
 
 			TSharedRef<FJsonObject> D = MakeShared<FJsonObject>();
@@ -159,6 +176,8 @@ namespace MCPPIE
 				D->SetObjectField(TEXT("expect"), ScriptExpectToJson(St.Def.Expect));
 				D->SetNumberField(TEXT("within_ms"), St.WithinMs);
 			}
+			if (St.Def.Arrange.Num() > 0) D->SetArrayField(TEXT("arrange"), St.Def.Arrange);
+			if (St.Def.Act.Num() > 0) D->SetArrayField(TEXT("act"), St.Def.Act);
 			if (St.WindowStartMs >= 0.0)
 			{
 				D->SetNumberField(TEXT("window_start_ms"), St.WindowStartMs);
@@ -166,10 +185,103 @@ namespace MCPPIE
 			}
 			AddScriptEvent(Run, TEXT("step_started"), Index, D);
 
-			if (St.Def.Judge == EScriptJudge::Auto && !St.Def.bHasExpect)
+			if (St.Def.Judge == EScriptJudge::Auto && !St.Def.bHasExpect && !bActs)
 			{
 				ScriptSettleStep(Run, Index, EScriptStepStatus::Passed, TEXT("no expectation"));
 			}
+		}
+
+		void ScriptEndAct(FScriptRun& Run, int32 Index, EScriptActState State)
+		{
+			FScriptStepRun& St = Run.Steps[Index];
+			St.Act.State = State;
+			St.Act.EndedAtMs = Run.NowMs;
+			TSharedRef<FJsonObject> D = MakeShared<FJsonObject>();
+			D->SetStringField(TEXT("status"), ScriptStepStatusToString(State == EScriptActState::Failed ? EScriptStepStatus::Failed : St.Status));
+			D->SetObjectField(TEXT("act_result"), ScriptActReportToJson(St.Act));
+			AddScriptEvent(Run, TEXT("step_acted"), Index, D);
+			if (State == EScriptActState::Failed)
+			{
+				ScriptSettleStep(Run, Index, EScriptStepStatus::Failed, St.Act.Reason);
+			}
+		}
+
+		// Runs a started step's arrange and act. True while the act still runs, which holds the run.
+		// When it ends, a manual step asks for its verdict and an auto step without expect passes.
+		bool ScriptDriveAct(FScriptRun& Run, int32 Index, IScriptStepDriver* Driver)
+		{
+			if (!ScriptStepActs(Run, Index)) return false;
+			FScriptStepRun& St = Run.Steps[Index];
+			if (St.Act.State == EScriptActState::None)
+			{
+				St.Act.StartedAtMs = Run.NowMs;
+				if (!Driver)
+				{
+					St.Act.State = EScriptActState::Skipped;
+					St.Act.Reason = TEXT("nothing ran arrange and act");
+				}
+				else
+				{
+					St.Act.State = EScriptActState::Running;
+					if (!Driver->BeginAct(Index, St.Def, Run.NowMs, St.Act))
+					{
+						ScriptEndAct(Run, Index, EScriptActState::Failed);
+						return false;
+					}
+				}
+			}
+			if (St.Act.State == EScriptActState::Running)
+			{
+				const EScriptActOutcome Outcome = Driver ? Driver->TickAct(Run.NowMs, St.Act) : EScriptActOutcome::Failed;
+				if (Outcome == EScriptActOutcome::Running) return true;
+				ScriptEndAct(Run, Index, Outcome == EScriptActOutcome::Done ? EScriptActState::Done : EScriptActState::Failed);
+			}
+			if (St.Status == EScriptStepStatus::Running)
+			{
+				if (St.Def.Judge == EScriptJudge::Manual)
+				{
+					St.Status = EScriptStepStatus::AwaitingVerdict;
+				}
+				else if (!St.Def.bHasExpect)
+				{
+					ScriptSettleStep(Run, Index, EScriptStepStatus::Passed, TEXT("no expectation"));
+				}
+			}
+			return false;
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ScriptJsonArrayFromString(const FString& Text)
+		{
+			TArray<TSharedPtr<FJsonValue>> Out;
+			if (Text.TrimStartAndEnd().IsEmpty()) return Out;
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
+			FJsonSerializer::Deserialize(Reader, Out);
+			return Out;
+		}
+
+		FString ScriptJsonArrayToString(const TArray<TSharedPtr<FJsonValue>>& Values)
+		{
+			if (Values.Num() == 0) return FString();
+			FString Out;
+			TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> W =
+				TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+			FJsonSerializer::Serialize(Values, W);
+			return Out;
+		}
+
+		// The array field Name of a step: absent or null is empty, anything but an array is an error.
+		bool ScriptStepArrayField(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Name, TArray<TSharedPtr<FJsonValue>>& Out, bool& bOutWrongType)
+		{
+			bOutWrongType = false;
+			const TSharedPtr<FJsonValue> V = Obj->TryGetField(Name);
+			if (!V.IsValid() || V->IsNull()) return false;
+			if (V->Type != EJson::Array)
+			{
+				bOutWrongType = true;
+				return false;
+			}
+			Out = V->AsArray();
+			return Out.Num() > 0;
 		}
 
 		void ScriptEvaluateRunningStep(FScriptRun& Run, int32 Index, FScriptValueReader Reader)
@@ -190,7 +302,7 @@ namespace MCPPIE
 					St.Evidence.AtStart = Current;
 				}
 			}
-			const double Elapsed = Run.NowMs - St.StartedAtMs;
+			const double Elapsed = Run.NowMs - St.ExpectFromMs();
 			const EScriptExpectOutcome Outcome = EvaluateScriptExpectFrame(E, bObserved,
 				St.Evidence.AtStart, Current, Elapsed, St.WithinMs);
 			if (Outcome == EScriptExpectOutcome::Passed)
@@ -286,6 +398,24 @@ namespace MCPPIE
 			if (Str.Equals(ScriptStatusNames[I], ESearchCase::IgnoreCase))
 			{
 				Out = static_cast<EScriptStepStatus>(I);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	FString ScriptActStateToString(EScriptActState State)
+	{
+		return ScriptActStateNames[static_cast<int32>(State)];
+	}
+
+	bool ParseScriptActState(const FString& Str, EScriptActState& Out)
+	{
+		for (int32 I = 0; I < UE_ARRAY_COUNT(ScriptActStateNames); ++I)
+		{
+			if (Str.Equals(ScriptActStateNames[I], ESearchCase::IgnoreCase))
+			{
+				Out = static_cast<EScriptActState>(I);
 				return true;
 			}
 		}
@@ -394,13 +524,62 @@ namespace MCPPIE
 			Out.bResolveInPIE = ResolveValue->AsBool();
 		}
 
+		// arrange: a scenario's arrange entries, checked by the scenario's own rules.
+		bool bWrongType = false;
+		if (ScriptStepArrayField(Obj, TEXT("arrange"), Out.Arrange, bWrongType))
+		{
+			TArray<FString> ArrangeErrors;
+			FPIEScenario::ValidateArrange(Out.Arrange, Where + TEXT(".arrange"), ArrangeErrors);
+			if (ArrangeErrors.Num() > 0)
+			{
+				Field = TEXT("arrange");
+				OutError = ArrangeErrors[0];
+				return false;
+			}
+		}
+		else if (bWrongType)
+		{
+			Field = TEXT("arrange");
+			OutError = FString::Printf(TEXT("%s.arrange must be an array of {kind: spawn|set|call, ...}"), *Where);
+			return false;
+		}
+
+		// act: uat_run's step actions, parsed by the executor that runs them.
+		if (ScriptStepArrayField(Obj, TEXT("act"), Out.Act, bWrongType))
+		{
+			for (int32 J = 0; J < Out.Act.Num(); ++J)
+			{
+				const TSharedPtr<FJsonObject>* ActObj = nullptr;
+				FStepAction Action;
+				FString ActErr;
+				if (!Out.Act[J].IsValid() || !Out.Act[J]->TryGetObject(ActObj) || !ActObj || !ParseStepAction(*ActObj, Action, ActErr))
+				{
+					Field = TEXT("act");
+					OutError = FString::Printf(TEXT("%s.act[%d]: %s"), *Where, J, ActErr.IsEmpty() ? TEXT("an action must be an object") : *ActErr);
+					return false;
+				}
+				if (Action.Client < 0)
+				{
+					Field = TEXT("act");
+					OutError = FString::Printf(TEXT("%s.act[%d]: client cannot be negative"), *Where, J);
+					return false;
+				}
+			}
+		}
+		else if (bWrongType)
+		{
+			Field = TEXT("act");
+			OutError = FString::Printf(TEXT("%s.act must be an array of step actions (tape, press, hold, inject, console, place, capture, wait_ms)"), *Where);
+			return false;
+		}
+
 		const TSharedPtr<FJsonValue> ExpectValue = Obj->TryGetField(TEXT("expect"));
 		if (!ExpectValue.IsValid() || ExpectValue->IsNull())
 		{
-			if (Out.bResolveInPIE)
+			if (Out.bResolveInPIE && !Out.HasArrangeOrAct())
 			{
 				Field = TEXT("resolve_in_pie");
-				OutError = FString::Printf(TEXT("%s.resolve_in_pie applies to a step with expect; this step has none"), *Where);
+				OutError = FString::Printf(TEXT("%s.resolve_in_pie applies to a step with expect, arrange or act; this step has none"), *Where);
 				return false;
 			}
 			return true;
@@ -530,6 +709,8 @@ namespace MCPPIE
 		O->SetStringField(TEXT("judge"), ScriptJudgeToString(Step.Judge));
 		if (Step.Judge == EScriptJudge::Manual) O->SetBoolField(TEXT("agent_judgeable"), Step.bAgentJudgeable);
 		if (Step.bResolveInPIE) O->SetBoolField(TEXT("resolve_in_pie"), true);
+		if (Step.Arrange.Num() > 0) O->SetArrayField(TEXT("arrange"), Step.Arrange);
+		if (Step.Act.Num() > 0) O->SetArrayField(TEXT("act"), Step.Act);
 		if (Step.bHasExpect) O->SetObjectField(TEXT("expect"), ScriptExpectToJson(Step.Expect));
 		return O;
 	}
@@ -557,7 +738,9 @@ namespace MCPPIE
 			D.Expect.Target = S.Expect.Target;
 			D.Expect.WithinMs = FMath::Max(0, S.Expect.WithinMs);
 			D.bAgentJudgeable = D.Judge != EScriptJudge::Manual || S.bAgentJudgeable;
-			D.bResolveInPIE = D.bHasExpect && S.bResolveInPIE;
+			D.Arrange = ScriptJsonArrayFromString(S.ArrangeJson);
+			D.Act = ScriptJsonArrayFromString(S.ActJson);
+			D.bResolveInPIE = (D.bHasExpect || D.HasArrangeOrAct()) && S.bResolveInPIE;
 			Out.Add(MoveTemp(D));
 		}
 	}
@@ -579,6 +762,8 @@ namespace MCPPIE
 			S.Expect.WithinMs = D.Expect.WithinMs;
 			S.bAgentJudgeable = D.bAgentJudgeable;
 			S.bResolveInPIE = D.bResolveInPIE;
+			S.ArrangeJson = ScriptJsonArrayToString(D.Arrange);
+			S.ActJson = ScriptJsonArrayToString(D.Act);
 			Asset->Steps.Add(MoveTemp(S));
 		}
 	}
@@ -707,6 +892,12 @@ namespace MCPPIE
 
 	void StartScriptManualSteps(FScriptRun& Run)
 	{
+		for (FScriptStepRun& St : Run.Steps)
+		{
+			if (!St.Def.HasArrangeOrAct()) continue;
+			St.Act.State = EScriptActState::Skipped;
+			St.Act.Reason = TEXT("a manual run has no PIE, so arrange and act did not run");
+		}
 		TArray<int32> Manual;
 		for (int32 I = 0; I < Run.Steps.Num(); ++I)
 		{
@@ -728,7 +919,7 @@ namespace MCPPIE
 		return true;
 	}
 
-	void AdvanceScriptRun(FScriptRun& Run, double NowMs, int64 Frame, FScriptValueReader Reader)
+	void AdvanceScriptRun(FScriptRun& Run, double NowMs, int64 Frame, FScriptValueReader Reader, IScriptStepDriver* Driver)
 	{
 		if (Run.State != EScriptRunState::Running && Run.State != EScriptRunState::AwaitingVerdict) return;
 		Run.NowMs = NowMs;
@@ -739,10 +930,20 @@ namespace MCPPIE
 			const int32 I = Run.CurrentStep;
 			if (Run.Steps[I].Def.Judge == EScriptJudge::Manual)
 			{
+				// A manual step that acts runs its act on its own first, so a block never shares one act.
+				if (ScriptStepActs(Run, I))
+				{
+					if (Run.Steps[I].Status == EScriptStepStatus::Pending) ScriptStartStep(Run, I);
+					if (ScriptDriveAct(Run, I, Driver))
+					{
+						Run.State = EScriptRunState::Running;
+						return;
+					}
+				}
 				int32 BlockEnd = I + 1;
 				if (Run.bBlockOnManual)
 				{
-					while (BlockEnd < N && Run.Steps[BlockEnd].Def.Judge == EScriptJudge::Manual) ++BlockEnd;
+					while (BlockEnd < N && Run.Steps[BlockEnd].Def.Judge == EScriptJudge::Manual && !ScriptStepActs(Run, BlockEnd)) ++BlockEnd;
 				}
 				for (int32 J = I; J < BlockEnd; ++J)
 				{
@@ -778,6 +979,11 @@ namespace MCPPIE
 			}
 
 			if (Run.Steps[I].Status == EScriptStepStatus::Pending) ScriptStartStep(Run, I);
+			if (ScriptDriveAct(Run, I, Driver))
+			{
+				Run.State = EScriptRunState::Running;
+				return;
+			}
 			if (Run.Steps[I].Status == EScriptStepStatus::Running) ScriptEvaluateRunningStep(Run, I, Reader);
 			if (Run.Steps[I].Status == EScriptStepStatus::Running)
 			{
@@ -872,6 +1078,11 @@ namespace MCPPIE
 			OutError = FString::Printf(TEXT("step %d has not started yet"), Step);
 			return false;
 		}
+		if (St.Status == EScriptStepStatus::Running)
+		{
+			OutError = FString::Printf(TEXT("step %d is still running its arrange and act"), Step);
+			return false;
+		}
 		if (St.Status == NewStatus && St.Note == Note && St.VerdictSource == VerdictSource
 			&& St.Evidence.Note == EvidenceNote && St.Evidence.Captures == Evidence.Captures)
 		{
@@ -915,9 +1126,15 @@ namespace MCPPIE
 		for (int32 I = 0; I < Run.Steps.Num(); ++I)
 		{
 			FScriptStepRun& St = Run.Steps[I];
+			if (St.Act.State == EScriptActState::Running)
+			{
+				St.Act.State = EScriptActState::Failed;
+				St.Act.EndedAtMs = Run.NowMs;
+				St.Act.Reason = Reason;
+			}
 			if (St.Status == EScriptStepStatus::Running)
 			{
-				ScriptSettleStep(Run, I, EScriptStepStatus::Failed, St.Evidence.bObserved
+				ScriptSettleStep(Run, I, EScriptStepStatus::Failed, St.Evidence.bObserved || !St.Def.bHasExpect
 					? Reason
 					: FString::Printf(TEXT("%s; '%s' was never readable"), *Reason, *St.Def.Expect.Value));
 			}
@@ -984,6 +1201,9 @@ namespace MCPPIE
 		O->SetStringField(TEXT("instruction"), St.Def.Instruction);
 		O->SetStringField(TEXT("judge"), ScriptJudgeToString(St.Def.Judge));
 		if (St.Def.Judge == EScriptJudge::Manual) O->SetBoolField(TEXT("agent_judgeable"), St.Def.bAgentJudgeable);
+		if (St.Def.bResolveInPIE) O->SetBoolField(TEXT("resolve_in_pie"), true);
+		if (St.Def.Arrange.Num() > 0) O->SetArrayField(TEXT("arrange"), St.Def.Arrange);
+		if (St.Def.Act.Num() > 0) O->SetArrayField(TEXT("act"), St.Def.Act);
 		if (St.Def.bHasExpect) O->SetObjectField(TEXT("expect"), ScriptExpectToJson(St.Def.Expect));
 		O->SetStringField(TEXT("status"), ScriptStepStatusToString(St.Status));
 		O->SetNumberField(TEXT("within_ms"), St.WithinMs);
@@ -1014,6 +1234,26 @@ namespace MCPPIE
 			O->SetNumberField(TEXT("window_start_ms"), St.WindowStartMs);
 			O->SetNumberField(TEXT("window_end_ms"), St.WindowEndMs);
 		}
+		if (St.Act.State != EScriptActState::None) O->SetObjectField(TEXT("act_result"), ScriptActReportToJson(St.Act));
+		return O;
+	}
+
+	TSharedRef<FJsonObject> ScriptActReportToJson(const FScriptActReport& R)
+	{
+		TSharedRef<FJsonObject> O = MakeShared<FJsonObject>();
+		O->SetStringField(TEXT("status"), ScriptActStateToString(R.State));
+		if (!R.Reason.IsEmpty()) O->SetStringField(TEXT("reason"), R.Reason);
+		if (R.State == EScriptActState::Skipped) return O;
+		O->SetNumberField(TEXT("arranged"), R.Arranged);
+		O->SetArrayField(TEXT("actions"), R.Actions);
+		if (R.StartedAtMs >= 0.0) O->SetNumberField(TEXT("started_at_ms"), R.StartedAtMs);
+		if (R.EndedAtMs >= 0.0)
+		{
+			O->SetNumberField(TEXT("ended_at_ms"), R.EndedAtMs);
+			O->SetNumberField(TEXT("duration_ms"), FMath::Max(0.0, R.EndedAtMs - R.StartedAtMs));
+		}
+		O->SetNumberField(TEXT("wall_ms"), R.WallMs);
+		if (R.Captures.Num() > 0) O->SetArrayField(TEXT("captures"), ScriptStringsToJson(R.Captures));
 		return O;
 	}
 
@@ -1143,6 +1383,20 @@ namespace MCPPIE
 			S->TryGetBoolField(TEXT("regression"), St.bRegression);
 			S->TryGetNumberField(TEXT("window_start_ms"), St.WindowStartMs);
 			S->TryGetNumberField(TEXT("window_end_ms"), St.WindowEndMs);
+			const TSharedPtr<FJsonObject>* ActResult = nullptr;
+			if (S->TryGetObjectField(TEXT("act_result"), ActResult) && ActResult)
+			{
+				FString ActState;
+				if ((*ActResult)->TryGetStringField(TEXT("status"), ActState)) ParseScriptActState(ActState, St.Act.State);
+				(*ActResult)->TryGetStringField(TEXT("reason"), St.Act.Reason);
+				(*ActResult)->TryGetNumberField(TEXT("arranged"), St.Act.Arranged);
+				(*ActResult)->TryGetNumberField(TEXT("started_at_ms"), St.Act.StartedAtMs);
+				(*ActResult)->TryGetNumberField(TEXT("ended_at_ms"), St.Act.EndedAtMs);
+				(*ActResult)->TryGetNumberField(TEXT("wall_ms"), St.Act.WallMs);
+				const TArray<TSharedPtr<FJsonValue>>* Actions = nullptr;
+				if ((*ActResult)->TryGetArrayField(TEXT("actions"), Actions) && Actions) St.Act.Actions = *Actions;
+				(*ActResult)->TryGetStringArrayField(TEXT("captures"), St.Act.Captures);
+			}
 			Out.Steps.Add(MoveTemp(St));
 		}
 		return true;
@@ -1171,6 +1425,11 @@ namespace MCPPIE
 			St.bHasSourceStatus = true;
 			St.SourceStatus = Src.Status;
 			St.WithinMs = Src.WithinMs > 0 ? Src.WithinMs : St.WithinMs;
+			if (St.Def.HasArrangeOrAct())
+			{
+				St.Act.State = EScriptActState::Skipped;
+				St.Act.Reason = TEXT("a replay replays the recorded input, so arrange and act did not run again");
+			}
 			if (St.Def.Judge == EScriptJudge::Manual)
 			{
 				if (IsScriptStepSettled(Src.Status))
@@ -1194,7 +1453,8 @@ namespace MCPPIE
 				St.Evidence.Reason = TEXT("not reached in the source run");
 				continue;
 			}
-			St.WindowStartMs = Src.StartedAtMs + OffsetMs;
+			// The window opened when the source step's act ended.
+			St.WindowStartMs = Src.ExpectFromMs() + OffsetMs;
 			St.WindowEndMs = St.WindowStartMs + St.WithinMs;
 		}
 	}
@@ -1219,6 +1479,144 @@ namespace MCPPIE
 			Id = FString::Printf(TEXT("%s_%d"), *Base, Suffix);
 		}
 		return Id;
+	}
+
+	// ── Arrange and act in the editor ───────────────────────────────────
+
+	namespace
+	{
+		/**
+		 * Runs a step's arrange through FPIEScenario::ApplyArrange and its act through the step action
+		 * executor pie(uat_run) drives, so a script step and a scenario step mean the same thing.
+		 */
+		class FEditorScriptStepDriver : public IScriptStepDriver
+		{
+		public:
+			explicit FEditorScriptStepDriver(const FString& InCaptureRoot) : CaptureRoot(InCaptureRoot) {}
+
+			virtual bool BeginAct(int32 Index, const FScriptStepDef& Def, double NowMs, FScriptActReport& Report) override
+			{
+				Runner.Reset();
+				UWorld* World = StepActionWorld();
+				if (!World)
+				{
+					Report.Reason = TEXT("no PIE world to arrange and act in");
+					return false;
+				}
+				if (Def.Arrange.Num() > 0)
+				{
+					FScenario Scenario;
+					Scenario.Arrange = Def.Arrange;
+					FString Err;
+					if (!FPIEScenario::ApplyArrange(World, Scenario, Report.Arranged, Err))
+					{
+						Report.Reason = Err;
+						return false;
+					}
+				}
+				TArray<FStepAction> Actions;
+				for (int32 I = 0; I < Def.Act.Num(); ++I)
+				{
+					const TSharedPtr<FJsonObject>* Obj = nullptr;
+					FStepAction A;
+					FString Err;
+					if (!Def.Act[I].IsValid() || !Def.Act[I]->TryGetObject(Obj) || !Obj || !ParseStepAction(*Obj, A, Err))
+					{
+						Report.Reason = FString::Printf(TEXT("act[%d]: %s"), I, *Err);
+						return false;
+					}
+					Actions.Add(MoveTemp(A));
+				}
+				Runner.CaptureRoot = CaptureRoot;
+				Runner.StepNumber = Index + 1;
+				Runner.BeginStep();
+				Sequence.Begin(Actions);
+				Reported = 0;
+				WallStart = FPlatformTime::Seconds();
+				SettleDeadline = 0.0;
+				return true;
+			}
+
+			virtual EScriptActOutcome TickAct(double NowMs, FScriptActReport& Report) override
+			{
+				const double Now = FPlatformTime::Seconds();
+				Runner.TickStops(Now);
+				FString Err;
+				const FStepActionSequence::EOutcome Outcome = Sequence.Tick(Runner, Now, Err);
+				Record(NowMs, Report);
+				if (Outcome == FStepActionSequence::EOutcome::Failed)
+				{
+					Report.Reason = FString::Printf(TEXT("act[%d] could not run: %s"), Sequence.FailedIndex, *Err);
+					return End(Report, Now, EScriptActOutcome::Failed);
+				}
+				if (Outcome == FStepActionSequence::EOutcome::Running || !Runner.InputIdle())
+				{
+					return EScriptActOutcome::Running;
+				}
+				// Every entry ran and its input played out. Remote players confirm what they ran, and host captures land.
+				if (!Runner.RelayedSettled() || !Runner.HostCapturesWritten())
+				{
+					if (SettleDeadline == 0.0) SettleDeadline = Now + 10.0;
+					if (Now < SettleDeadline) return EScriptActOutcome::Running;
+				}
+				for (const FStepActionRunner::FRelayed& Req : Runner.Relayed)
+				{
+					const UMCPPIERemoteControl* Remote = PIERemotePlayers::FindById(Req.Id);
+					const FMCPPIERemoteResult* Result = Remote ? Remote->FindResult(Req.Id) : nullptr;
+					if (!Result || !Result->bOk)
+					{
+						Report.Reason = Result
+							? FString::Printf(TEXT("client %d could not run %s: %s"), Req.Client, *Req.What, *Result->Error)
+							: FString::Printf(TEXT("client %d never confirmed %s"), Req.Client, *Req.What);
+						return End(Report, Now, EScriptActOutcome::Failed);
+					}
+				}
+				for (const FStepActionRunner::FCapture& C : Runner.Captures)
+				{
+					if (C.Written.IsValid() && *C.Written != 1)
+					{
+						Report.Reason = FString::Printf(TEXT("capture %s was not written"), *C.File);
+						return End(Report, Now, EScriptActOutcome::Failed);
+					}
+					Report.Captures.Add(CaptureRoot / C.File);
+				}
+				return End(Report, Now, EScriptActOutcome::Done);
+			}
+
+			virtual void Cancel() override
+			{
+				Runner.Reset();
+			}
+
+		private:
+			void Record(double NowMs, FScriptActReport& Report)
+			{
+				for (; Reported < Sequence.Records.Num(); ++Reported)
+				{
+					const FStepActionSequence::FRecord& R = Sequence.Records[Reported];
+					TSharedRef<FJsonObject> A = MakeShared<FJsonObject>();
+					A->SetNumberField(TEXT("index"), R.Index);
+					A->SetStringField(TEXT("action"), R.Verb);
+					A->SetBoolField(TEXT("ok"), R.bOk);
+					if (!R.Error.IsEmpty()) A->SetStringField(TEXT("error"), R.Error);
+					A->SetNumberField(TEXT("at_ms"), NowMs);
+					Report.Actions.Add(MakeShared<FJsonValueObject>(A));
+				}
+			}
+
+			EScriptActOutcome End(FScriptActReport& Report, double Now, EScriptActOutcome Outcome)
+			{
+				Report.WallMs = (Now - WallStart) * 1000.0;
+				return Outcome;
+			}
+
+			FString CaptureRoot;
+			FStepActionRunner Runner;
+			FStepActionSequence Sequence;
+			int32 Reported = 0;
+			double WallStart = 0.0;
+			double SettleDeadline = 0.0;
+		};
 	}
 
 	// ── Runner ──────────────────────────────────────────────────────────
@@ -1296,7 +1694,7 @@ namespace MCPPIE
 	{
 		auto Reader = [this](const FScriptExpect& E, double& V) { return ReadLive(E, V); };
 		if (Run.bReplay) AdvanceScriptReplay(Run, Run.NowMs, Run.Frame, Reader);
-		else AdvanceScriptRun(Run, Run.NowMs, Run.Frame, Reader);
+		else AdvanceScriptRun(Run, Run.NowMs, Run.Frame, Reader, StepDriver.Get());
 		if (IsScriptRunSettled(Run))
 		{
 			Finish(EScriptRunState::Finished, TEXT("all steps settled"));
@@ -1406,6 +1804,7 @@ namespace MCPPIE
 		}
 
 		NewRun.State = EScriptRunState::Armed;
+		StepDriver = MakeShared<FEditorScriptStepDriver>(NewRun.OutputDir);
 		Run = MoveTemp(NewRun);
 		bHasRun = true;
 
@@ -1650,6 +2049,11 @@ namespace MCPPIE
 	void FPIEScriptRunner::Finish(EScriptRunState FinalState, const FString& Reason)
 	{
 		if (!IsActive()) return;
+		if (StepDriver.IsValid())
+		{
+			StepDriver->Cancel();
+			StepDriver.Reset();
+		}
 		SettleUnfinishedScriptSteps(Run, FString::Printf(TEXT("run ended before the step settled (%s)"), *Reason));
 
 		if (Run.bManualMode)

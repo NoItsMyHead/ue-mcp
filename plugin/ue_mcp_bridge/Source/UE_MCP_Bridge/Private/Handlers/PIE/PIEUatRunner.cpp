@@ -3,6 +3,7 @@
 #include "Handlers/PIE/PIELog.h"
 #include "MCPPIEInputInjector.h"
 #include "Handlers/PIE/PIERemotePlayers.h"
+#include "Handlers/PIE/PIEStepActions.h"
 #include "MCPPIERemoteControl.h"
 #include "MCPPIEViewportCapture.h"
 #include "SceneViewExtension.h"
@@ -136,22 +137,6 @@ namespace MCPPIE
 
 		// ── Scenario model ──────────────────────────────────────────────────
 
-		struct FUatAction
-		{
-			enum class EKind { Tape, Hold, Inject, Console, Wait, Place, Capture } Kind = EKind::Wait;
-			int32 Client = 0;
-			FString ActionPath;
-			TArray<FVector> Values;
-			FVector Value = FVector(1, 0, 0);
-			float Ms = 0.0f;
-			FString Command;
-			// Place: next to actor `At` (offset in its local frame, facing it), or at `Value` with `Yaw`.
-			FString At;
-			FVector Offset = FVector(300, 0, 0);
-			bool bFace = true;
-			TOptional<double> Yaw;
-		};
-
 		struct FUatRule
 		{
 			FString Log;      // "host" or "client:N"
@@ -165,7 +150,7 @@ namespace MCPPIE
 		struct FUatStep
 		{
 			FString Name;
-			TArray<FUatAction> Do;
+			TArray<FStepAction> Do;
 			TArray<FUatRule> Expect;
 			TArray<FUatRule> Forbid;
 			float WindowMs = 4000.0f;
@@ -178,31 +163,6 @@ namespace MCPPIE
 			TArray<FString> Details;
 			TArray<FString> Captures; // images written during the step, relative to the report directory
 		};
-
-		FVector ParseVector(const TSharedPtr<FJsonValue>& V)
-		{
-			FVector Out(0, 0, 0);
-			if (!V.IsValid())
-			{
-				return FVector(1, 0, 0);
-			}
-			if (V->Type == EJson::Number)
-			{
-				Out.X = V->AsNumber();
-			}
-			else if (V->Type == EJson::Boolean)
-			{
-				Out.X = V->AsBool() ? 1.0 : 0.0;
-			}
-			else if (V->Type == EJson::Array)
-			{
-				const TArray<TSharedPtr<FJsonValue>>& A = V->AsArray();
-				if (A.Num() > 0) Out.X = A[0]->AsNumber();
-				if (A.Num() > 1) Out.Y = A[1]->AsNumber();
-				if (A.Num() > 2) Out.Z = A[2]->AsNumber();
-			}
-			return Out;
-		}
 
 		/** FRegexPattern swallows a bad pattern and then matches nothing, so compile it with ICU first. */
 		bool ValidateRegex(const FString& Pattern, FString& Err)
@@ -257,118 +217,6 @@ namespace MCPPIE
 			}
 			return true;
 		}
-
-		bool ParseAction(const TSharedPtr<FJsonObject>& O, FUatAction& Out, FString& Err)
-		{
-			double N = 0;
-			if (O->TryGetNumberField(TEXT("client"), N)) Out.Client = static_cast<int32>(N);
-
-			if (O->TryGetNumberField(TEXT("wait_ms"), N))
-			{
-				Out.Kind = FUatAction::EKind::Wait;
-				Out.Ms = static_cast<float>(N);
-				return true;
-			}
-			FString Cmd;
-			if (O->TryGetStringField(TEXT("console"), Cmd))
-			{
-				Out.Kind = FUatAction::EKind::Console;
-				Out.Command = Cmd;
-				return true;
-			}
-
-			const TSharedPtr<FJsonObject>* Body = nullptr;
-			auto ActionOf = [&Out, &Err](const TSharedPtr<FJsonObject>& B) -> bool
-			{
-				if (!B->TryGetStringField(TEXT("action"), Out.ActionPath) || Out.ActionPath.IsEmpty())
-				{
-					Err = TEXT("an input action entry has no action path");
-					return false;
-				}
-				return true;
-			};
-
-			if (O->TryGetObjectField(TEXT("tape"), Body))
-			{
-				Out.Kind = FUatAction::EKind::Tape;
-				if (!ActionOf(*Body)) return false;
-				const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
-				if (!(*Body)->TryGetArrayField(TEXT("values"), Values) || Values->Num() == 0)
-				{
-					Err = TEXT("a tape has no values");
-					return false;
-				}
-				for (const TSharedPtr<FJsonValue>& V : *Values) { Out.Values.Add(ParseVector(V)); }
-				return true;
-			}
-			if (O->TryGetObjectField(TEXT("press"), Body))
-			{
-				Out.Kind = FUatAction::EKind::Tape;
-				if (!ActionOf(*Body)) return false;
-				double Frames = 4;
-				(*Body)->TryGetNumberField(TEXT("frames"), Frames);
-				for (int32 i = 0; i < FMath::Max(1, static_cast<int32>(Frames)); ++i) { Out.Values.Add(FVector(1, 0, 0)); }
-				Out.Values.Add(FVector::ZeroVector);
-				return true;
-			}
-			if (O->TryGetObjectField(TEXT("hold"), Body))
-			{
-				Out.Kind = FUatAction::EKind::Hold;
-				if (!ActionOf(*Body)) return false;
-				Out.Value = ParseVector((*Body)->TryGetField(TEXT("value")));
-				double Ms = 0;
-				if (!(*Body)->TryGetNumberField(TEXT("ms"), Ms) || Ms <= 0)
-				{
-					Err = TEXT("a hold needs ms > 0");
-					return false;
-				}
-				Out.Ms = static_cast<float>(Ms);
-				return true;
-			}
-			if (O->TryGetObjectField(TEXT("inject"), Body))
-			{
-				Out.Kind = FUatAction::EKind::Inject;
-				if (!ActionOf(*Body)) return false;
-				Out.Value = ParseVector((*Body)->TryGetField(TEXT("value")));
-				return true;
-			}
-			if (O->TryGetObjectField(TEXT("place"), Body))
-			{
-				Out.Kind = FUatAction::EKind::Place;
-				const TSharedPtr<FJsonObject>& P = *Body;
-				double Yaw = 0;
-				if (P->TryGetNumberField(TEXT("yaw"), Yaw)) Out.Yaw = Yaw;
-				P->TryGetBoolField(TEXT("face"), Out.bFace);
-				if (P->TryGetStringField(TEXT("at"), Out.At) && !Out.At.IsEmpty())
-				{
-					if (P->HasField(TEXT("offset"))) Out.Offset = ParseVector(P->TryGetField(TEXT("offset")));
-					return true;
-				}
-				if (P->HasField(TEXT("location")))
-				{
-					Out.Value = ParseVector(P->TryGetField(TEXT("location")));
-					return true;
-				}
-				Err = TEXT("place needs at (an actor name or label) or location");
-				return false;
-			}
-			if (const TSharedPtr<FJsonValue> Capture = O->TryGetField(TEXT("capture")))
-			{
-				Out.Kind = FUatAction::EKind::Capture;
-				if (Capture->Type == EJson::String)
-				{
-					Out.Command = FPaths::MakeValidFileName(Capture->AsString());
-				}
-				else if (Capture->Type != EJson::Boolean || !Capture->AsBool())
-				{
-					Err = TEXT("capture takes a label (string) or true");
-					return false;
-				}
-				return true;
-			}
-			Err = TEXT("an action must be one of tape, press, hold, inject, console, place, capture, wait_ms");
-			return false;
-		}
 	}
 
 	// ── Runner ──────────────────────────────────────────────────────────────
@@ -392,20 +240,12 @@ namespace MCPPIE
 
 		// Progress.
 		int32 StepIndex = 0;
-		int32 ActionIndex = 0;
 		double PhaseStart = 0.0;
-		double WaitUntil = 0.0;
 		int32 HostMark = 0;
 		TMap<int32, int32> ClientMarks;
-		struct FUatPendingStop { double At; int32 Client; FString Id; };
-		TArray<FUatPendingStop> PendingStops;
-		// Requests relayed to remote players in the current step; each must be confirmed applied.
-		struct FUatRelayed { FString Id; int32 Client; FString What; };
-		TArray<FUatRelayed> Relayed;
-		// Captures taken in the current step. Host captures report through Written (0 pending, 1 written, 2 failed).
-		struct FUatCapture { int32 Client; FString File; TSharedPtr<int32> Written; };
-		TArray<FUatCapture> StepCaptures;
-		TSharedPtr<FPIEViewportCapture> HostCapture;
+		// Runs each step's actions; its relayed requests must be confirmed applied and its captures written.
+		FStepActionRunner Actions;
+		FStepActionSequence Sequence;
 
 		// Separate-process clients render offscreen (no window) at a fixed frame rate.
 		bool bWindowless = false;
@@ -616,7 +456,7 @@ namespace MCPPIE
 					Count == 0 ? TEXT("ok  ") : TEXT("HIT "), *Rule.Log, *Rule.Pattern, Count,
 					Samples.Num() ? *FString::Printf(TEXT(" e.g. %s"), *Samples[0].Left(200)) : TEXT("")));
 			}
-			for (const FUatRelayed& Req : Relayed)
+			for (const FStepActionRunner::FRelayed& Req : Actions.Relayed)
 			{
 				const UMCPPIERemoteControl* Remote = PIERemotePlayers::FindById(Req.Id);
 				const FMCPPIERemoteResult* Result = Remote ? Remote->FindResult(Req.Id) : nullptr;
@@ -631,7 +471,7 @@ namespace MCPPIE
 					R.Details.Add(FString::Printf(TEXT("FAIL client %d could not run %s: %s"), Req.Client, *Req.What, *Result->Error));
 				}
 			}
-			for (const FUatCapture& C : StepCaptures)
+			for (const FStepActionRunner::FCapture& C : Actions.Captures)
 			{
 				if (C.Written.IsValid() && *C.Written != 1)
 				{
@@ -650,30 +490,10 @@ namespace MCPPIE
 			return R;
 		}
 
-		bool HostCapturesWritten() const
-		{
-			for (const FUatCapture& C : StepCaptures)
-			{
-				if (C.Written.IsValid() && *C.Written == 0) return false;
-			}
-			return true;
-		}
-
-		// Every relayed request has been answered.
-		bool RelayedSettled() const
-		{
-			for (const FUatRelayed& Req : Relayed)
-			{
-				const UMCPPIERemoteControl* Remote = PIERemotePlayers::FindById(Req.Id);
-				if (!Remote || !Remote->FindResult(Req.Id)) return false;
-			}
-			return true;
-		}
-
 		// A step may end before its window only when nothing later in the window could change the verdict.
 		bool CanFinishEarly(const FUatStep& Step) const
 		{
-			if (Step.Forbid.Num() > 0 || (Step.Expect.Num() == 0 && StepCaptures.Num() == 0))
+			if (Step.Forbid.Num() > 0 || (Step.Expect.Num() == 0 && Actions.Captures.Num() == 0))
 			{
 				return false;
 			}
@@ -681,236 +501,16 @@ namespace MCPPIE
 			{
 				if (Rule.Max >= 0) return false;
 			}
-			return ExpectationsMet(Step) && RelayedSettled() && HostCapturesWritten();
-		}
-
-		static FInputActionValue ToValue(const UInputAction* Input, const FVector& Value)
-		{
-			switch (Input->ValueType)
-			{
-			case EInputActionValueType::Boolean: return FInputActionValue(Value.X != 0.0);
-			case EInputActionValueType::Axis1D:  return FInputActionValue(static_cast<float>(Value.X));
-			case EInputActionValueType::Axis2D:  return FInputActionValue(FVector2D(Value.X, Value.Y));
-			default:                             return FInputActionValue(Value);
-			}
-		}
-
-		/** Teleports a player's pawn on the server; the owning client follows through movement correction. */
-		bool Place(const FUatAction& A, FString& Err)
-		{
-			UWorld* World = PIERemotePlayers::FindServerWorld();
-			if (!World) World = GEditor->PlayWorld;
-			if (!World)
-			{
-				Err = TEXT("place: no PIE world");
-				return false;
-			}
-			APlayerController* PC = nullptr;
-			UMCPPIERemoteControl* Remote = nullptr;
-			if (A.Client > 0)
-			{
-				Remote = PIERemotePlayers::Find(A.Client, Err);
-				PC = Remote ? Cast<APlayerController>(Remote->GetOwner()) : nullptr;
-			}
-			else
-			{
-				PC = World->GetFirstPlayerController();
-				PC = PC && PC->IsLocalController() ? PC : nullptr;
-			}
-			APawn* Pawn = PC ? PC->GetPawn() : nullptr;
-			if (!Pawn)
-			{
-				Err = FString::Printf(TEXT("place: client %d has no pawn%s"), A.Client, Err.IsEmpty() ? TEXT("") : *(TEXT(" (") + Err + TEXT(")")));
-				return false;
-			}
-
-			const FVector Requested = A.Value;
-			AActor* Target = nullptr;
-			if (!A.At.IsEmpty())
-			{
-				for (TActorIterator<AActor> It(World); It && !Target; ++It)
-				{
-					if (It->GetName() == A.At || It->GetActorLabel() == A.At)
-					{
-						Target = *It;
-					}
-				}
-				if (!Target)
-				{
-					Err = FString::Printf(TEXT("place: no actor named or labelled %s in %s"), *A.At, *World->GetName());
-					return false;
-				}
-			}
-			const FVector Wanted = Target ? Target->GetActorTransform().TransformPosition(A.Offset) : Requested;
-
-			// The spot asked for, else the nearest free one around it: in a level with props an exact spot is often
-			// taken. Each candidate keeps facing the target when there is one.
-			FVector Location = Wanted;
-			FRotator Rotation(0, A.Yaw.Get(Pawn->GetActorRotation().Yaw), 0);
-			bool bPlaced = false;
-			for (int32 Ring = 0; Ring <= 6 && !bPlaced; ++Ring)
-			{
-				const int32 Count = Ring == 0 ? 1 : 12;
-				for (int32 i = 0; i < Count && !bPlaced; ++i)
-				{
-					const double Angle = 2.0 * PI * i / Count;
-					Location = Wanted + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0) * (60.0 * Ring);
-					if (Target && A.bFace && !A.Yaw.IsSet())
-					{
-						Rotation.Yaw = (Target->GetActorLocation() - Location).Rotation().Yaw;
-					}
-					bPlaced = Pawn->TeleportTo(Location, Rotation);
-				}
-			}
-			if (!bPlaced)
-			{
-				Err = FString::Printf(TEXT("place: %s fits nowhere within 360 units of %s"), *Pawn->GetName(), *Wanted.ToCompactString());
-				return false;
-			}
-			PC->SetControlRotation(Rotation);
-			if (Remote)
-			{
-				// The owning client keeps its own facing and moves from it; it has to turn itself.
-				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
-				PIERemotePlayers::RememberId(Id, Remote);
-				Remote->SendFace(Id, Rotation);
-				Relayed.Add({ Id, A.Client, FString::Printf(TEXT("turning to yaw %.0f"), Rotation.Yaw) });
-			}
-			UE_LOG(LogMCPPIE, Log, TEXT("[UAT] placed %s at %s yaw %.0f"), *Pawn->GetName(), *Location.ToCompactString(), Rotation.Yaw);
-			return true;
-		}
-
-		/** Saves a player's view into the report's captures folder; the step checks it was written. */
-		bool RequestCapture(const FUatAction& A, FString& Err)
-		{
-			const FString Label = A.Command.IsEmpty() ? FString::FromInt(StepCaptures.Num() + 1) : A.Command;
-			const FString File = FString::Printf(TEXT("captures/step%02d_client%d_%s.jpg"), StepIndex + 1, A.Client, *Label);
-			const FString Path = ReportDir / File;
-			if (A.Client > 0)
-			{
-				UMCPPIERemoteControl* Remote = PIERemotePlayers::Find(A.Client, Err);
-				if (!Remote)
-				{
-					return false;
-				}
-				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
-				PIERemotePlayers::RememberId(Id, Remote);
-				Remote->SendCapture(Id, Path);
-				Relayed.Add({ Id, A.Client, FString::Printf(TEXT("capture %s"), *File) });
-				StepCaptures.Add({ A.Client, File, nullptr });
-				return true;
-			}
-			UWorld* Server = PIERemotePlayers::FindServerWorld();
-			const FWorldContext* HostContext = Server ? GEditor->GetWorldContextFromWorld(Server) : nullptr;
-			if (!HostContext || !HostContext->GameViewport || !HostContext->GameViewport->Viewport)
-			{
-				Err = TEXT("capture: the host player has no viewport");
-				return false;
-			}
-			if (!HostCapture.IsValid())
-			{
-				HostCapture = FSceneViewExtensions::NewExtension<FPIEViewportCapture>();
-				HostCapture->SetOutputFormat(/*bJpeg*/ true, 85);
-				HostCapture->SetEnabled(true);
-			}
-			HostCapture->SetTargetViewport(HostContext->GameViewport->Viewport);
-			IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), true);
-			TSharedPtr<int32> Written = MakeShared<int32>(0);
-			HostCapture->RequestCapture(Path, [Written](bool bOk) { *Written = bOk ? 1 : 2; });
-			StepCaptures.Add({ 0, File, Written });
-			return true;
-		}
-
-		bool RunAction(const FUatAction& A, FString& Err)
-		{
-			UInputAction* Input = nullptr;
-			if (A.Kind == FUatAction::EKind::Tape || A.Kind == FUatAction::EKind::Hold || A.Kind == FUatAction::EKind::Inject)
-			{
-				Input = Cast<UInputAction>(FSoftObjectPath(A.ActionPath).TryLoad());
-				if (!Input)
-				{
-					Err = FString::Printf(TEXT("InputAction %s not found"), *A.ActionPath);
-					return false;
-				}
-			}
-
-			if (A.Kind == FUatAction::EKind::Place)
-			{
-				return Place(A, Err);
-			}
-			if (A.Kind == FUatAction::EKind::Capture)
-			{
-				return RequestCapture(A, Err);
-			}
-
-			if (A.Client > 0)
-			{
-				UMCPPIERemoteControl* Remote = PIERemotePlayers::Find(A.Client, Err);
-				if (!Remote)
-				{
-					return false;
-				}
-				const FString Id = PIERemotePlayers::NewId(TEXT("uat"));
-				PIERemotePlayers::RememberId(Id, Remote);
-				FString What;
-				switch (A.Kind)
-				{
-				case FUatAction::EKind::Tape:
-					Remote->SendTape(Id, FSoftObjectPath(Input), A.Values);
-					What = FString::Printf(TEXT("a tape on %s"), *Input->GetName());
-					break;
-				case FUatAction::EKind::Inject:
-					Remote->SendInject(Id, FSoftObjectPath(Input), A.Value);
-					What = FString::Printf(TEXT("an inject on %s"), *Input->GetName());
-					break;
-				case FUatAction::EKind::Console:
-					Remote->SendConsole(Id, A.Command);
-					What = FString::Printf(TEXT("console '%s'"), *A.Command);
-					break;
-				case FUatAction::EKind::Hold:
-					Remote->SendStartHold(Id, FSoftObjectPath(Input), A.Value);
-					PendingStops.Add({ Now() + A.Ms / 1000.0, A.Client, Id });
-					What = FString::Printf(TEXT("a hold on %s"), *Input->GetName());
-					break;
-				default: break;
-				}
-				Relayed.Add({ Id, A.Client, What });
-				return true;
-			}
-
-			// The editor's own player.
-			switch (A.Kind)
-			{
-			case FUatAction::EKind::Tape:
-				return !FPIEInputInjector::StartTape(Input, A.Values, 60, FString(), Err).IsEmpty();
-			case FUatAction::EKind::Inject:
-				return FPIEInputInjector::InjectOnce(Input, ToValue(Input, A.Value), Err);
-			case FUatAction::EKind::Hold:
-			{
-				// Timed by the wall clock, like a remote hold; a tape would stretch with the frame rate.
-				const FString Id = FPIEInputInjector::StartHold(Input, ToValue(Input, A.Value), FString(), Err);
-				if (Id.IsEmpty())
-				{
-					return false;
-				}
-				PendingStops.Add({ Now() + A.Ms / 1000.0, 0, Id });
-				return true;
-			}
-			case FUatAction::EKind::Console:
-			{
-				UWorld* World = PIERemotePlayers::FindLocalPlayerWorld();
-				return !PIERemotePlayers::RunLocalConsole(World, A.Command).IsEmpty();
-			}
-			default:
-				return true;
-			}
+			return ExpectationsMet(Step) && Actions.RelayedSettled() && Actions.HostCapturesWritten();
 		}
 
 		void MarkStepStart()
 		{
 			HostMark = HostLog.Num();
-			Relayed.Reset();
-			StepCaptures.Reset();
+			Actions.CaptureRoot = ReportDir;
+			Actions.StepNumber = StepIndex + 1;
+			Actions.BeginStep();
+			if (Steps.IsValidIndex(StepIndex)) Sequence.Begin(Steps[StepIndex].Do);
 			ClientMarks.Reset();
 			for (const TPair<int32, FClientLogTail>& Pair : ClientLogs)
 			{
@@ -941,11 +541,7 @@ namespace MCPPIE
 			State = EState::Finished;
 			GLog->RemoveOutputDevice(&HostLog);
 			RestoreSettings();
-			if (HostCapture.IsValid())
-			{
-				HostCapture->SetEnabled(false);
-				HostCapture.Reset();
-			}
+			Actions.Reset();
 			for (int32 i = Results.Num(); i < Steps.Num(); ++i)
 			{
 				Results.Add({ Steps[i].Name, TEXT("SKIPPED"), {} });
@@ -1049,21 +645,7 @@ namespace MCPPIE
 			const double T = Now();
 			PollClientLogs();
 
-			for (int32 i = PendingStops.Num() - 1; i >= 0; --i)
-			{
-				if (T >= PendingStops[i].At)
-				{
-					if (PendingStops[i].Client == 0)
-					{
-						FPIEInputInjector::StopHold(PendingStops[i].Id);
-					}
-					else if (UMCPPIERemoteControl* Remote = PIERemotePlayers::FindById(PendingStops[i].Id))
-					{
-						Remote->SendStop(PendingStops[i].Id);
-					}
-					PendingStops.RemoveAt(i);
-				}
-			}
+			Actions.TickStops(T);
 
 			switch (State)
 			{
@@ -1105,9 +687,7 @@ namespace MCPPIE
 				if (T - PhaseStart >= SettleMs / 1000.0)
 				{
 					StepIndex = 0;
-					ActionIndex = 0;
 					MarkStepStart();
-					WaitUntil = 0.0;
 					State = Steps.Num() ? EState::Acting : EState::Stopping;
 					if (State == EState::Stopping) BeginStop();
 				}
@@ -1120,26 +700,18 @@ namespace MCPPIE
 					Fail(TEXT("PIE ended during the run"));
 					break;
 				}
-				if (T < WaitUntil)
-				{
-					break;
-				}
 				const FUatStep& Step = Steps[StepIndex];
-				while (ActionIndex < Step.Do.Num())
+				FString Err;
+				const FStepActionSequence::EOutcome Outcome = Sequence.Tick(Actions, T, Err);
+				if (Outcome == FStepActionSequence::EOutcome::Running)
 				{
-					const FUatAction& A = Step.Do[ActionIndex++];
-					if (A.Kind == FUatAction::EKind::Wait)
-					{
-						WaitUntil = T + A.Ms / 1000.0;
-						return true;
-					}
-					FString Err;
-					if (!RunAction(A, Err))
-					{
-						Results.Add({ Step.Name, TEXT("FAIL"), { FString::Printf(TEXT("action %d could not run: %s"), ActionIndex, *Err) } });
-						AdvanceStep(T);
-						return true;
-					}
+					return true;
+				}
+				if (Outcome == FStepActionSequence::EOutcome::Failed)
+				{
+					Results.Add({ Step.Name, TEXT("FAIL"), { FString::Printf(TEXT("action %d could not run: %s"), Sequence.FailedIndex + 1, *Err) } });
+					AdvanceStep(T);
+					return true;
 				}
 				State = EState::Watching;
 				PhaseStart = T;
@@ -1187,8 +759,6 @@ namespace MCPPIE
 		void AdvanceStep(double T)
 		{
 			++StepIndex;
-			ActionIndex = 0;
-			WaitUntil = 0.0;
 			if (bAborted || StepIndex >= Steps.Num())
 			{
 				BeginStop();
@@ -1217,11 +787,7 @@ namespace MCPPIE
 		{
 			Impl->RestoreSettings();
 		}
-		if (Impl->HostCapture.IsValid())
-		{
-			Impl->HostCapture->SetEnabled(false);
-			Impl->HostCapture.Reset();
-		}
+		Impl->Actions.Reset();
 		if (Impl->TickHandle.IsValid())
 		{
 			FTSTicker::GetCoreTicker().RemoveTicker(Impl->TickHandle);
@@ -1356,13 +922,13 @@ namespace MCPPIE
 			{
 				for (const TSharedPtr<FJsonValue>& V : *Arr)
 				{
-					FUatAction A;
-					if (!V->AsObject().IsValid() || !ParseAction(V->AsObject(), A, Err))
+					FStepAction A;
+					if (!V->AsObject().IsValid() || !ParseStepAction(V->AsObject(), A, Err))
 					{
 						OutError = FString::Printf(TEXT("step %d (%s): %s"), i + 1, *Step.Name, *Err);
 						return false;
 					}
-					if (A.Client < 0 || A.Client >= Fresh.Players + (Fresh.bListen ? 0 : 1) || (A.Client == 0 && !Fresh.bListen && A.Kind != FUatAction::EKind::Wait))
+					if (A.Client < 0 || A.Client >= Fresh.Players + (Fresh.bListen ? 0 : 1) || (A.Client == 0 && !Fresh.bListen && A.Kind != FStepAction::EKind::Wait))
 					{
 						OutError = FString::Printf(TEXT("step %d (%s): client %d does not exist with %d players (%s)"), i + 1, *Step.Name, A.Client, Fresh.Players, Fresh.bListen ? TEXT("listen") : TEXT("dedicated"));
 						return false;
@@ -1394,7 +960,7 @@ namespace MCPPIE
 					}
 				}
 			}
-			const bool bCaptures = Step.Do.ContainsByPredicate([](const FUatAction& A) { return A.Kind == FUatAction::EKind::Capture; });
+			const bool bCaptures = Step.Do.ContainsByPredicate([](const FStepAction& A) { return A.Kind == FStepAction::EKind::Capture; });
 			if (Step.Expect.Num() == 0 && Step.Forbid.Num() == 0 && !bCaptures)
 			{
 				OutError = FString::Printf(TEXT("step %d (%s) checks nothing; give it expect, forbid or a capture"), i + 1, *Step.Name);

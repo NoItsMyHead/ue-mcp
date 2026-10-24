@@ -153,7 +153,7 @@ describe("applyUpdate from a release", () => {
     expect(result.repinned).toEqual([mcp]);
     expect(JSON.parse(fs.readFileSync(mcp, "utf-8")).mcpServers["ue-mcp"]).toEqual({
       command: "C:/node/npx.cmd",
-      args: ["-y", "ue-mcp@1.1.0", uproject.replace(/\\/g, "/")],
+      args: ["-y", "--min-release-age=0", "ue-mcp@1.1.0", uproject.replace(/\\/g, "/")],
     });
   });
 

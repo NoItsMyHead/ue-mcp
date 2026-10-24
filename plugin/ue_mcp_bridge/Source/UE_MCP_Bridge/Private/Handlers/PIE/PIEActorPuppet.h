@@ -10,6 +10,7 @@
 #include "Dom/JsonValue.h"
 
 class AActor;
+class UClass;
 class UObject;
 class UWorld;
 
@@ -23,6 +24,10 @@ namespace MCPPIE
 		// an unresolved path or a coercion failure. No PIE required.
 		static bool SetPropertyByPath(UObject* Root, const FString& Path,
 		                              const TSharedPtr<FJsonValue>& Value, FString& OutError);
+
+		// The actor class SpawnActor would spawn for ClassPath (native class, or a Blueprint
+		// path with or without _C). Null + OutError when it is missing or not an actor.
+		static UClass* ResolveActorClass(const FString& ClassPath, FString& OutError);
 
 		// Spawn ClassPath (native class or "/Game/.../BP_X.BP_X_C") at Xform. Returns
 		// the actor (its GetName() is the id FindActorById resolves), null + OutError otherwise.

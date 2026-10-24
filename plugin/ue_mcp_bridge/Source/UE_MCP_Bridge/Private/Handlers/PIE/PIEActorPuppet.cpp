@@ -122,10 +122,8 @@ namespace MCPPIE
 		return true;
 	}
 
-	AActor* FPIEActorPuppet::SpawnActor(UWorld* World, const FString& ClassPath,
-	                                    const FTransform& Xform, FString& OutError)
+	UClass* FPIEActorPuppet::ResolveActorClass(const FString& ClassPath, FString& OutError)
 	{
-		if (!World) { OutError = TEXT("no PIE world"); return nullptr; }
 		if (ClassPath.IsEmpty()) { OutError = TEXT("empty class path"); return nullptr; }
 
 		UClass* Class = LoadObject<UClass>(nullptr, *ClassPath);
@@ -140,6 +138,15 @@ namespace MCPPIE
 			OutError = FString::Printf(TEXT("%s is not an AActor"), *ClassPath);
 			return nullptr;
 		}
+		return Class;
+	}
+
+	AActor* FPIEActorPuppet::SpawnActor(UWorld* World, const FString& ClassPath,
+	                                    const FTransform& Xform, FString& OutError)
+	{
+		if (!World) { OutError = TEXT("no PIE world"); return nullptr; }
+		UClass* Class = ResolveActorClass(ClassPath, OutError);
+		if (!Class) return nullptr;
 
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;

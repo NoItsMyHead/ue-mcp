@@ -70,6 +70,7 @@ export const REGISTERED_HANDLER_TIMEOUT_SECONDS: Readonly<Record<string, number>
   bulk_restore_data_assets: 120,
   bulk_set_component_property: 300,
   bulk_upsert_data_assets: 120,
+  checkpoint_finish_restore: 300,
   compile_customizable_object: 600,
   convert_brushes_to_static_mesh: 600,
   create_cpp_class: 300,

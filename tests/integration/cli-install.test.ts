@@ -128,7 +128,7 @@ describe("init --yes", () => {
       const entry = ueMcpEntry(config);
       expect(entry, config).toBeDefined();
       // The machine path pins the exact version so server and bridge move together.
-      expect(entry.args).toEqual(["-y", `ue-mcp@${PACKAGE_VERSION}`, serves]);
+      expect(entry.args).toEqual(["-y", "--min-release-age=0", `ue-mcp@${PACKAGE_VERSION}`, serves]);
     }
     const codex = fs.readFileSync(path.join(sb.home, ".codex", "config.toml"), "utf8");
     expect(codex).toContain("[mcp_servers.ue-mcp]");

@@ -37,7 +37,7 @@ import {
   type BinaryTarget,
 } from "./bridge-binaries.js";
 import { deploy, projectEngineVersion } from "./deployer.js";
-import { detectMcpClients, readUeMcpEntry, writeMcpConfig } from "../integrations/claude-code/mcp-client-config.js";
+import { detectMcpClients, liftsAgeGate, readUeMcpEntry, writeMcpConfig } from "../integrations/claude-code/mcp-client-config.js";
 import { readEnv } from "../core/env.js";
 import { removeLegacyPythonContent } from "./legacy-python.js";
 
@@ -285,14 +285,18 @@ export interface ApplyResult {
   error?: string;
 }
 
-/** Move every pinned client config of this project to `version`, keeping each entry's command. */
+/**
+ * Move every pinned client config of this project to `version`, keeping each
+ * entry's command. An entry already on `version` is rewritten when its launch
+ * would still be refused by npm's release-age gate (#1510).
+ */
 export function repinClientConfigs(uprojectPath: string, version: string): string[] {
   const projectDir = path.dirname(path.resolve(uprojectPath));
   const target = path.resolve(uprojectPath).replace(/\\/g, "/").toLowerCase();
   const moved: string[] = [];
   for (const client of detectMcpClients(projectDir)) {
     const entry = readUeMcpEntry(client);
-    if (!entry.pinned || entry.pinned === version) continue;
+    if (!entry.pinned || (entry.pinned === version && liftsAgeGate(entry.args))) continue;
     if (entry.project && path.resolve(entry.project).replace(/\\/g, "/").toLowerCase() !== target) continue;
     writeMcpConfig(client, uprojectPath, { pin: version, command: entry.command && entry.command !== "npx" ? entry.command : null });
     moved.push(client.configPath);

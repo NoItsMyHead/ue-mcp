@@ -102,6 +102,16 @@
       "summary": "ue-mcp doctor --fix removes client config entries that point at missing projects"
     },
     {
+      "id": "cli.doctor.age-gate",
+      "group": "cli",
+      "summary": "ue-mcp doctor reports an npx launch npm's release-age gate would refuse, and --fix lifts the gate in that entry"
+    },
+    {
+      "id": "client.launch.age-gate",
+      "group": "cli",
+      "summary": "a client config ue-mcp writes starts the server through npx under min-release-age on the day of a release"
+    },
+    {
       "id": "cli.status",
       "group": "cli",
       "summary": "ue-mcp status reports a project's install, client and editor state"
@@ -297,6 +307,11 @@
       "summary": "the in-process server in the micro strategy advertises the tools gateway and flow, with the micro instructions"
     },
     {
+      "id": "server.checkpoints",
+      "group": "server",
+      "summary": "editor(checkpoint, list_checkpoints, list_changes, restore) record and restore files written through the server with no editor running"
+    },
+    {
       "id": "server.startup.lean.in-process",
       "group": "server",
       "summary": "the in-process server in the lean strategy advertises the catalog tool and trimmed category tools"
@@ -387,6 +402,11 @@
       "summary": "flow(plan) resolves a flow's steps without running them"
     },
     {
+      "id": "flow.plan.inputs",
+      "group": "flow",
+      "summary": "flow(plan) and GET /v1/flows/<name>/plan report the inputs a run may pass, derived from the step schemas and options_schema"
+    },
+    {
       "id": "flow.run.yaml",
       "group": "flow",
       "summary": "flow(run) runs a flow defined in ue-mcp.yml and reports each step"
@@ -435,6 +455,11 @@
       "id": "config.env-overlay",
       "group": "config",
       "summary": "UE_MCP_ENV or env: selects ue-mcp.<env>.yml"
+    },
+    {
+      "id": "config.checkpoints",
+      "group": "config",
+      "summary": "checkpoints are off unless ue-mcp.yml sets checkpoints: on, and the daemon overrides that per session"
     },
     {
       "id": "version-check.notice",
@@ -520,6 +545,11 @@
       "id": "daemon.update",
       "group": "daemon",
       "summary": "the daemon reports and applies bridge updates over /v1/update"
+    },
+    {
+      "id": "daemon.checkpoints",
+      "group": "daemon",
+      "summary": "the daemon's /v1/checkpoints routes create, list, diff, restore and clear checkpoints, arm the editor's save recording and publish checkpoint events, without touching the project's .git"
     },
     {
       "id": "package.dist-server",

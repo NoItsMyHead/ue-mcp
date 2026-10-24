@@ -33,13 +33,14 @@ describe("the model behind flow agent steps", () => {
 });
 
 describe("the extension API range", () => {
-  it("is 2, and still loads an extension built for 1", () => {
-    expect(EXTENSION_API_VERSION).toBe(2);
+  it("is 3, and still loads an extension built for 1", () => {
+    expect(EXTENSION_API_VERSION).toBe(3);
     expect(EXTENSION_API_MIN_VERSION).toBe(1);
     expect(extensionApiSupported(1, 1)).toBe(true);
     expect(extensionApiSupported(1, 2)).toBe(true);
     expect(extensionApiSupported(2, 2)).toBe(true);
-    expect(extensionApiSupported(3, 3)).toBe(false);
+    expect(extensionApiSupported(3, 3)).toBe(true);
+    expect(extensionApiSupported(4, 4)).toBe(false);
     expect(extensionApiSupported(0, 0)).toBe(false);
   });
 });

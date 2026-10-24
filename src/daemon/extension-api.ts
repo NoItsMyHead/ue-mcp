@@ -8,10 +8,13 @@ import type { DisconnectCause } from "./disconnect.js";
 import type { DaemonEvent } from "./events.js";
 import type { UiManifest } from "./ui-bundles.js";
 import type { ModelProvider } from "../flow/model-provider.js";
+import type { ChangesResult, CheckpointResult, CheckpointState, RestoreResult } from "../checkpoints/service.js";
+
+export type { ChangeEntry, CheckpointInfo, ChangesResult, CheckpointResult, CheckpointState, RestoreRefusal, RestoreResult } from "../checkpoints/service.js";
 
 export type { ModelProvider, ModelRequest, ModelResponse } from "../flow/model-provider.js";
 
-export const EXTENSION_API_VERSION = 2;
+export const EXTENSION_API_VERSION = 3;
 
 /**
  * The oldest extension API this daemon still serves. Versions up to EXTENSION_API_VERSION
@@ -129,9 +132,12 @@ export interface DaemonExtensionApi {
    *   "events.dialog"            dialog.opened, dialog.answered, dialog.delegated and
    *                              dialog.closed on the event stream (see DialogEventData)
    *   "models.provider"          `models.register` supplies the model flow agent steps run on
-   *   "events.script"            script.run_started, script.step_started, script.step_passed,
-   *                              script.step_failed, script.verdict_requested, script.verdict and
-   *                              script.run_finished on the event stream (see ScriptEvent)
+   *   "events.script"            script.run_started, script.step_started, script.step_acted,
+   *                              script.step_passed, script.step_failed, script.verdict_requested,
+   *                              script.verdict and script.run_finished on the event stream (see ScriptEvent)
+   *   "checkpoints"              `checkpoints` drives each session's shadow history, and
+   *                              checkpoint.created, checkpoint.restored, checkpoints.toggled and
+   *                              checkpoints.cleared are on the event stream (API 3)
    * Absent on a daemon older than the field.
    */
   features?: readonly string[];
@@ -145,6 +151,22 @@ export interface DaemonExtensionApi {
    */
   models?: {
     register(provider: ModelProvider): () => void;
+  };
+
+  /**
+   * Checkpoints per editor session (#1482), feature "checkpoints", API 3: the
+   * same operations and payloads as the /v1/checkpoints routes. `editor` names
+   * a session; omitted is the active one. `setEnabled` is the per-session
+   * override, kept in memory for the daemon's lifetime; null follows
+   * ue-mcp.yml again.
+   */
+  checkpoints?: {
+    state(opts?: { editor?: string; limit?: number }): Promise<CheckpointState>;
+    setEnabled(enabled: boolean | null, opts?: { editor?: string }): Promise<CheckpointState>;
+    create(label?: string, opts?: { editor?: string }): Promise<CheckpointResult>;
+    changes(from: string, to?: string, opts?: { editor?: string }): Promise<ChangesResult>;
+    restore(checkpoint: string, opts?: { paths?: string[]; force?: boolean; editor?: string }): Promise<RestoreResult>;
+    clear(opts?: { editor?: string }): Promise<{ editor: string; cleared: true }>;
   };
 
   editors(): EditorStatus[];
@@ -209,4 +231,6 @@ export interface DaemonHealth {
   extensions: Array<{ name: string; version: string }>;
   /** Version of the UI bundle being served, or null. */
   ui: string | null;
+  /** What the HTTP API offers beyond apiVersion, for feature detection ("checkpoints"). Absent on a daemon older than the field. */
+  features?: readonly string[];
 }

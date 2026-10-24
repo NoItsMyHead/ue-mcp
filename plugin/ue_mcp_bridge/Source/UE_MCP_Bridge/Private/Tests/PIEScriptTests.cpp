@@ -573,4 +573,248 @@ bool FPIEScriptManualModeTest::RunTest(const FString& /*Parameters*/)
 	return true;
 }
 
+namespace MCPPIEScriptTests
+{
+	// Stands in for the editor's driver: an act takes TicksToRun ticks after BeginAct, then ends as told.
+	class FFakeStepDriver : public IScriptStepDriver
+	{
+	public:
+		int32 TicksToRun = 2;
+		bool bFailBegin = false;
+		bool bFailAct = false;
+		TArray<int32> Begun;
+		int32 Cancelled = 0;
+
+		virtual bool BeginAct(int32 Index, const FScriptStepDef& Def, double NowMs, FScriptActReport& Report) override
+		{
+			Begun.Add(Index);
+			Remaining = TicksToRun;
+			Report.Arranged = Def.Arrange.Num();
+			if (bFailBegin)
+			{
+				Report.Reason = TEXT("arrange[0] set: actor 'Nope' not found");
+				return false;
+			}
+			return true;
+		}
+
+		virtual EScriptActOutcome TickAct(double NowMs, FScriptActReport& Report) override
+		{
+			if (Remaining-- > 0) return EScriptActOutcome::Running;
+			TSharedRef<FJsonObject> A = MakeShared<FJsonObject>();
+			A->SetStringField(TEXT("action"), TEXT("place"));
+			A->SetBoolField(TEXT("ok"), !bFailAct);
+			Report.Actions.Add(MakeShared<FJsonValueObject>(A));
+			if (bFailAct)
+			{
+				Report.Reason = TEXT("act[0] could not run: place: client 0 has no pawn");
+				return EScriptActOutcome::Failed;
+			}
+			return EScriptActOutcome::Done;
+		}
+
+		virtual void Cancel() override { ++Cancelled; }
+
+	private:
+		int32 Remaining = 0;
+	};
+
+	FScriptStepDef WithAct(FScriptStepDef S)
+	{
+		S.Arrange = ParseJsonValue(TEXT("[{\"kind\":\"set\",\"target\":\"Door\",\"path\":\"OpenAngle\",\"value\":0}]"))->AsArray();
+		S.Act = ParseJsonValue(TEXT("[{\"place\":{\"at\":\"Door\",\"offset\":[-150,0,0]}},{\"press\":{\"action\":\"/Game/Input/IA_Interact.IA_Interact\"}}]"))->AsArray();
+		return S;
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPIEScriptArrangeActParseTest,
+	"UE.MCP.PIE.Script.ArrangeAct.Parse",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPIEScriptArrangeActParseTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MCPPIEScriptTests;
+
+	FScriptStepDef Def;
+	FString Err, Field;
+	TestTrue(TEXT("door step parses"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"Open the door\",\"arrange\":[{\"kind\":\"set\",\"target\":\"Door\",\"path\":\"OpenAngle\",\"value\":0}],"
+		"\"act\":[{\"place\":{\"at\":\"Door\",\"offset\":[-150,0,0]}},{\"press\":{\"action\":\"/Game/Input/IA_Interact.IA_Interact\"}},{\"wait_ms\":100}],"
+		"\"expect\":{\"value\":\"Door.OpenAngle\",\"op\":\"gt\",\"target\":80}}")), 0, Def, Err, &Field));
+	TestEqual(TEXT("arrange kept"), Def.Arrange.Num(), 1);
+	TestEqual(TEXT("act kept"), Def.Act.Num(), 3);
+	TestTrue(TEXT("expect kept"), Def.bHasExpect);
+
+	const TSharedRef<FJsonObject> Back = ScriptStepDefToJson(Def);
+	FScriptStepDef Again;
+	TestTrue(TEXT("written step parses again"), ParseScriptStepJson(MakeShared<FJsonValueObject>(Back), 0, Again, Err));
+	TestEqual(TEXT("round trip arrange"), Again.Arrange.Num(), 1);
+	TestEqual(TEXT("round trip act"), Again.Act.Num(), 3);
+
+	TestFalse(TEXT("unknown act verb refused"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"x\",\"act\":[{\"teleport\":{\"at\":\"Door\"}}]}")), 2, Def, Err, &Field));
+	TestEqual(TEXT("unknown verb names act"), Field, FString(TEXT("act")));
+	TestTrue(TEXT("unknown verb message says where"), Err.StartsWith(TEXT("steps[2].act[0]:")));
+
+	TestFalse(TEXT("arrange set without target refused"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"x\",\"arrange\":[{\"kind\":\"set\",\"path\":\"A\",\"value\":1}]}")), 1, Def, Err, &Field));
+	TestEqual(TEXT("arrange problem names arrange"), Field, FString(TEXT("arrange")));
+	TestTrue(TEXT("arrange message uses the scenario's rule"), Err.Contains(TEXT("steps[1].arrange[0] set needs 'target'")));
+
+	TestFalse(TEXT("act must be an array"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"x\",\"act\":{\"wait_ms\":5}}")), 0, Def, Err, &Field));
+	TestEqual(TEXT("act shape names act"), Field, FString(TEXT("act")));
+
+	TestTrue(TEXT("a manual step may carry act"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"Looks open?\",\"judge\":\"manual\",\"act\":[{\"console\":\"stat fps\"}]}")), 0, Def, Err));
+	TestTrue(TEXT("resolve_in_pie applies to a step with act"), ParseScriptStepJson(ParseJsonValue(TEXT(
+		"{\"instruction\":\"x\",\"resolve_in_pie\":true,\"act\":[{\"place\":{\"at\":\"BP_Spawned_C_0\"}}]}")), 0, Def, Err));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPIEScriptArrangeActRunTest,
+	"UE.MCP.PIE.Script.ArrangeAct.Run",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPIEScriptArrangeActRunTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MCPPIEScriptTests;
+
+	double Angle = 0.0;
+	auto Reader = [&Angle](const FScriptExpect&, double& Out) { Out = Angle; return true; };
+
+	// The window opens when act ends: within_ms 50 counts from 100 ms, not from the step's start at 0.
+	FScriptRun Run;
+	Run.RunId = TEXT("script_act");
+	Run.DefaultWithinMs = 1000;
+	InitScriptRun(Run, {
+		WithAct(AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("Door.OpenAngle"), true, 80.0, 50))),
+		AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("Door.OpenAngle"), true, 80.0)),
+	});
+	Run.State = EScriptRunState::Running;
+	FFakeStepDriver Driver;
+	AdvanceScriptRun(Run, 0.0, 0, Reader, &Driver);
+	TestEqual(TEXT("arrange and act began once"), Driver.Begun.Num(), 1);
+	TestTrue(TEXT("acting step runs"), Run.Steps[0].Status == EScriptStepStatus::Running);
+	TestTrue(TEXT("act running"), Run.Steps[0].Act.State == EScriptActState::Running);
+	TestEqual(TEXT("expect not sampled while acting"), Run.Steps[0].Evidence.Samples, 0);
+	AdvanceScriptRun(Run, 50.0, 1, Reader, &Driver);
+	TestTrue(TEXT("act still running"), Run.Steps[0].Act.State == EScriptActState::Running);
+	TestTrue(TEXT("next step waits for the act"), Run.Steps[1].Status == EScriptStepStatus::Pending);
+	AdvanceScriptRun(Run, 100.0, 2, Reader, &Driver);
+	TestTrue(TEXT("act done"), Run.Steps[0].Act.State == EScriptActState::Done);
+	TestEqual(TEXT("act ended at 100 ms"), Run.Steps[0].Act.EndedAtMs, 100.0);
+	TestEqual(TEXT("one step_acted event"), CountEvents(Run, TEXT("step_acted")), 1);
+	Angle = 90.0;
+	AdvanceScriptRun(Run, 140.0, 3, Reader, &Driver);
+	TestTrue(TEXT("passes 40 ms into its window"), Run.Steps[0].Status == EScriptStepStatus::Passed);
+	TestEqual(TEXT("verdict_at_ms counts from the end of act"), Run.Steps[0].Evidence.VerdictAtMs, 40.0);
+
+	const TSharedRef<FJsonObject> StepJson = ScriptStepRunToJson(Run.Steps[0], 0);
+	const TSharedPtr<FJsonObject>* ActResult = nullptr;
+	TestTrue(TEXT("results carry act_result"), StepJson->TryGetObjectField(TEXT("act_result"), ActResult) && ActResult);
+	if (ActResult)
+	{
+		double Duration = -1.0;
+		TestTrue(TEXT("act_result has its duration"), (*ActResult)->TryGetNumberField(TEXT("duration_ms"), Duration) && Duration == 100.0);
+		TestEqual(TEXT("act_result status"), (*ActResult)->GetStringField(TEXT("status")), FString(TEXT("done")));
+		TestEqual(TEXT("act_result lists the actions"), (*ActResult)->GetArrayField(TEXT("actions")).Num(), 1);
+		TestEqual(TEXT("act_result counts arrange"), static_cast<int32>((*ActResult)->GetNumberField(TEXT("arranged"))), 1);
+	}
+
+	FScriptRun Back;
+	FString Err;
+	TestTrue(TEXT("results.json reads back"), ScriptRunFromResultsJson(ScriptRunToResultsJson(Run), Back, Err));
+	TestEqual(TEXT("act end read back"), Back.Steps[0].Act.EndedAtMs, 100.0);
+	TestEqual(TEXT("act steps read back"), Back.Steps[0].Def.Act.Num(), 2);
+
+	// A replay does not act again, and its window opens where the source act ended.
+	Back.Steps[0].Status = EScriptStepStatus::Passed;
+	FScriptRun Replay;
+	PrepareScriptReplayRun(Back, 500.0, Replay);
+	TestEqual(TEXT("replay window from the act's end"), Replay.Steps[0].WindowStartMs, 600.0);
+	TestTrue(TEXT("replay skips act"), Replay.Steps[0].Act.State == EScriptActState::Skipped);
+
+	// An act that fails fails its step with the act's reason, and the run moves on.
+	FScriptRun Failing;
+	InitScriptRun(Failing, { WithAct(AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("A"), true, 1.0))), AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("A"), true, 1.0)) });
+	Failing.State = EScriptRunState::Running;
+	FFakeStepDriver Broken;
+	Broken.TicksToRun = 0;
+	Broken.bFailAct = true;
+	AdvanceScriptRun(Failing, 0.0, 0, Reader, &Broken);
+	TestTrue(TEXT("failed act fails the step"), Failing.Steps[0].Status == EScriptStepStatus::Failed);
+	TestTrue(TEXT("with the act's reason"), Failing.Steps[0].Evidence.Reason.Contains(TEXT("no pawn")));
+	TestTrue(TEXT("the run moves on"), Failing.Steps[1].Status == EScriptStepStatus::Passed);
+
+	FScriptRun BadArrange;
+	InitScriptRun(BadArrange, { WithAct(AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("A"), true, 1.0))) });
+	BadArrange.State = EScriptRunState::Running;
+	FFakeStepDriver NoActor;
+	NoActor.bFailBegin = true;
+	AdvanceScriptRun(BadArrange, 0.0, 0, Reader, &NoActor);
+	TestTrue(TEXT("arrange that cannot apply fails the step"), BadArrange.Steps[0].Status == EScriptStepStatus::Failed);
+	TestTrue(TEXT("act report failed"), BadArrange.Steps[0].Act.State == EScriptActState::Failed);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FPIEScriptArrangeActManualTest,
+	"UE.MCP.PIE.Script.ArrangeAct.Manual",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FPIEScriptArrangeActManualTest::RunTest(const FString& /*Parameters*/)
+{
+	using namespace MCPPIEScriptTests;
+
+	double Value = 0.0;
+	auto Reader = [&Value](const FScriptExpect&, double& Out) { Out = Value; return true; };
+
+	// A manual step's act sets the scene before its verdict is asked for.
+	FScriptRun Run;
+	Run.bBlockOnManual = true;
+	InitScriptRun(Run, { WithAct(ManualStep(TEXT("The door swings smoothly?"))), ManualStep(TEXT("No pop?")) });
+	Run.State = EScriptRunState::Running;
+	FFakeStepDriver Driver;
+	Driver.TicksToRun = 1;
+	AdvanceScriptRun(Run, 0.0, 0, Reader, &Driver);
+	TestTrue(TEXT("acting manual step runs"), Run.Steps[0].Status == EScriptStepStatus::Running);
+	TestTrue(TEXT("the next manual step waits"), Run.Steps[1].Status == EScriptStepStatus::Pending);
+	bool bUnchanged = false;
+	FString Err;
+	TestFalse(TEXT("no verdict while acting"), ApplyScriptVerdict(Run, 0, TEXT("pass"), FString(), TEXT("action"), FScriptVerdictEvidence(), bUnchanged, Err));
+	TestTrue(TEXT("the refusal says why"), Err.Contains(TEXT("arrange and act")));
+	AdvanceScriptRun(Run, 16.0, 1, Reader, &Driver);
+	TestTrue(TEXT("awaits its verdict once act ended"), Run.Steps[0].Status == EScriptStepStatus::AwaitingVerdict);
+	TestTrue(TEXT("the block awaits both"), Run.State == EScriptRunState::AwaitingVerdict);
+	TestEqual(TEXT("both awaiting"), ScriptAwaitingSteps(Run).Num(), 2);
+	TestTrue(TEXT("verdict after act"), ApplyScriptVerdict(Run, 0, TEXT("pass"), FString(), TEXT("action"), FScriptVerdictEvidence(), bUnchanged, Err));
+
+	// A manual run has no PIE: arrange and act are skipped, and the step says so.
+	FScriptRun Manual;
+	Manual.bManualMode = true;
+	InitScriptRun(Manual, { WithAct(ManualStep(TEXT("Looks right?"))), WithAct(AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("A"), true, 1.0))) });
+	StartScriptManualSteps(Manual);
+	TestTrue(TEXT("manual run skips act"), Manual.Steps[0].Act.State == EScriptActState::Skipped);
+	TestTrue(TEXT("and says why"), Manual.Steps[0].Act.Reason.Contains(TEXT("no PIE")));
+	TestTrue(TEXT("the manual step still awaits"), Manual.Steps[0].Status == EScriptStepStatus::AwaitingVerdict);
+	const TSharedPtr<FJsonObject>* ActResult = nullptr;
+	TestTrue(TEXT("the step's result says it was skipped"), ScriptStepRunToJson(Manual.Steps[0], 0)->TryGetObjectField(TEXT("act_result"), ActResult)
+		&& ActResult && (*ActResult)->GetStringField(TEXT("status")) == TEXT("skipped"));
+
+	// Ending a run mid act fails the act and the step.
+	FScriptRun Stopped;
+	InitScriptRun(Stopped, { WithAct(AutoStep(MakeExpect(EScriptExpectOp::Gt, TEXT("A"), true, 1.0))) });
+	Stopped.State = EScriptRunState::Running;
+	FFakeStepDriver Slow;
+	Slow.TicksToRun = 10;
+	AdvanceScriptRun(Stopped, 0.0, 0, Reader, &Slow);
+	SettleUnfinishedScriptSteps(Stopped, TEXT("stopped"));
+	TestTrue(TEXT("act failed on stop"), Stopped.Steps[0].Act.State == EScriptActState::Failed);
+	TestTrue(TEXT("step failed on stop"), Stopped.Steps[0].Status == EScriptStepStatus::Failed);
+	return true;
+}
+
 #endif

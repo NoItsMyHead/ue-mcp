@@ -4,6 +4,7 @@ import { parseHeader, collectFiles, findSourceRoots, resolveModuleDir } from "..
 import { listContent } from "../../codeintel/content-index.js";
 import { specBp } from "../specs/project.generated.js";
 import type { ToolContext, ActionSpec } from "../../core/types.js";
+import { recordBeforeWrite } from "../../checkpoints/service.js";
 
 /**
  * Resolve a module name to its Source/<Module> directory, searching the project
@@ -240,6 +241,7 @@ export const sourceActions: Record<string, ActionSpec> = {
 
       const overwrote = fs.existsSync(resolved);
       fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      recordBeforeWrite(ctx.session, resolved);
       fs.writeFileSync(resolved, content, "utf-8");
       return {
         path: resolved,
@@ -293,6 +295,7 @@ export const sourceActions: Record<string, ActionSpec> = {
 
       const overwrote = fs.existsSync(target);
       fs.mkdirSync(path.dirname(target), { recursive: true });
+      recordBeforeWrite(ctx.session, target);
       fs.writeFileSync(target, content, "utf-8");
       return {
         module: path.basename(moduleDir),
@@ -377,6 +380,7 @@ export const sourceActions: Record<string, ActionSpec> = {
         content = content.replace(ctorCloseRe, `${newBlock}$1`);
       }
 
+      recordBeforeWrite(ctx.session, buildCs);
       fs.writeFileSync(buildCs, content, "utf-8");
       return {
         status: "updated",
@@ -467,6 +471,7 @@ export const sourceActions: Record<string, ActionSpec> = {
         : `\n${access}:\n${indented}\n${lastAccess}:\n`;
 
       const updated = `${original.slice(0, closeIdx)}${insertion}${original.slice(closeIdx)}`;
+      recordBeforeWrite(ctx.session, resolved);
       fs.writeFileSync(resolved, updated, "utf-8");
       return {
         status: "added",

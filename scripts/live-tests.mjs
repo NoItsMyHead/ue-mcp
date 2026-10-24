@@ -18,6 +18,8 @@
  *   --shards <n>      Most headless shards; fewer start when memory is short.
  *   --shard <name>    Run one shard of the plan (h1, r1, b1, ...).
  *   --files a,b       Run only files whose path contains one of these.
+ *   --files-from <f>  Run only the files a selection lists: the JSON scripts/select-tests.ts
+ *                     writes (its `live` array), or one path per line. An empty list runs nothing.
  *   --record-timing   Make this full run the committed timing baseline.
  *   --attach          Attach mode for the whole suite.
  *   --record-golden   Re-record tests/golden/editor-connected.json instead of
@@ -56,6 +58,19 @@ const flagValue = (name) => {
   const i = argv.indexOf(name);
   return i !== -1 ? argv[i + 1] : null;
 };
+/** The live files a --files-from list names, or null without one. */
+function filesFrom(file) {
+  if (!file) return null;
+  const text = fs.readFileSync(file, "utf8");
+  if (text.trimStart().startsWith("{")) return JSON.parse(text).live ?? [];
+  return text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+}
+const FILES = flagValue("--files-from") ? filesFrom(flagValue("--files-from")) : flagValue("--files")?.split(",").filter(Boolean) ?? null;
+if (FILES && FILES.length === 0 && !LIFECYCLE) {
+  console.error("[live] the selection lists no live files, so nothing runs.");
+  process.exit(0);
+}
+
 // Attach mode drives the tests/ue_mcp editor already running; the default
 // launches one editor per shard on its own copy of the project.
 const ATTACH = argv.includes("--attach") || LIFECYCLE || RECORD_GOLDEN || ONLY !== null;
@@ -72,7 +87,7 @@ if (!ATTACH) {
       render: Number(flagValue("--render-shards") ?? 1),
       interactive: Number(flagValue("--interactive-shards") ?? 1),
       scm: 1,
-      files: flagValue("--files")?.split(",").filter(Boolean) ?? null,
+      files: FILES,
       onlyShard: flagValue("--shard"),
       recordTiming: argv.includes("--record-timing"),
       exeKind: flagValue("--editor-exe") === "cmd" ? "cmd" : "editor",
@@ -162,7 +177,7 @@ console.error(
     : "[live] nothing below starts or stops an editor.\n",
 );
 
-const targets = LIFECYCLE ? [LIFECYCLE_FILE] : ONLY ? [ONLY] : ["tests/live"];
+const targets = LIFECYCLE ? [LIFECYCLE_FILE] : ONLY ? [ONLY] : FILES ?? ["tests/live"];
 // Every run records its timing; --record-timing on a full run makes it the baseline.
 const attachReport = path.join(REPO_ROOT, "tests", ".shards", "attach-report.json");
 fs.mkdirSync(path.dirname(attachReport), { recursive: true });

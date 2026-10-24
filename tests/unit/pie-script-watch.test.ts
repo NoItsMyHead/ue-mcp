@@ -336,3 +336,23 @@ describe("agent verdict payloads", () => {
     expect((mapped as unknown as { summary: Record<string, unknown> }).summary).toMatchObject({ humanVerdicts: 1, agentVerdicts: 2 });
   });
 });
+
+describe("arrange and act payloads", () => {
+  it("publishes step_acted with what the act did and how long it took", () => {
+    const actResult = {
+      status: "done", arranged: 1, started_at_ms: 50, ended_at_ms: 410, duration_ms: 360, wall_ms: 372,
+      actions: [{ index: 0, action: "place", ok: true, at_ms: 50 }, { index: 1, action: "press", ok: true, at_ms: 50 }],
+    };
+    const mapped = mapBridgeEvent(
+      { seq: 3, type: "step_acted", run_id: "script_door", step: 0, at_ms: 410, wall_time: "2026-10-24T00:00:00Z",
+        data: { status: "running", act_result: actResult } },
+      { runId: "script_door", script: "/Game/PIEStudio/Scripts/Door" },
+      { steps: [{ index: 0, instruction: "Open the door", judge: "auto", status: "running",
+        act: [{ place: { at: "Door" } }, { press: { action: "/Game/Input/IA_Interact.IA_Interact" } }] }] },
+    );
+    expect(mapped?.type).toBe("step_acted");
+    const step = (mapped as unknown as { step: Record<string, unknown> }).step;
+    expect(step).toMatchObject({ index: 0, status: "running", actResult });
+    expect(step.act).toHaveLength(2);
+  });
+});

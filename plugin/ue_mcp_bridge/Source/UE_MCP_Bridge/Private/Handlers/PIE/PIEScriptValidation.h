@@ -67,6 +67,9 @@ namespace MCPPIE
 		TFunction<FScriptLookup(const FString& Path)> ResolveValue;
 		TFunction<FScriptLookup(const FString& ActorId)> ResolveActor;
 		TFunction<FScriptLookup(const FString& Widget)> ResolveWidget;
+		// Arrange and act: the Input Action an input entry drives, and the actor class a spawn names.
+		TFunction<FScriptLookup(const FString& ActionPath)> ResolveInputAction;
+		TFunction<FScriptLookup(const FString& ClassPath)> ResolveActorClass;
 	};
 
 	// The Pool entries closest to Needle, best first, ignoring case.
@@ -77,7 +80,8 @@ namespace MCPPIE
 	bool ParseScriptStepsJsonIssues(const TArray<TSharedPtr<FJsonValue>>& Values, TArray<FScriptStepDef>& Out,
 		TArray<FScriptStepIssue>& OutIssues);
 
-	// Resolves each expectation and checks its op and target against the value's type.
+	// Resolves each expectation and checks its op and target against the value's type, and each
+	// arrange and act entry's actor, actor class and Input Action (unless the step resolves in PIE).
 	// Without bManualOnly, a script needs at least one auto step with an expect.
 	// SkipSteps are steps that failed to parse: they are not checked, and the auto-step rule is not applied.
 	void ValidateScriptSteps(const TArray<FScriptStepDef>& Steps, bool bManualOnly, const FScriptValidationContext& Ctx,
