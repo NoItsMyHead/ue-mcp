@@ -1057,7 +1057,7 @@
       "tests": [
         {
           "suite": "integration",
-          "file": "tests/integration/daemon-cli.test.ts",
+          "file": "tests/integration/daemon-server-mode.test.ts",
           "test": "takes daemon or in-process from ue-mcp.yml when no variable names one"
         }
       ]
@@ -1070,12 +1070,12 @@
       "tests": [
         {
           "suite": "integration",
-          "file": "tests/integration/daemon-cli.test.ts",
+          "file": "tests/integration/daemon-server-mode.test.ts",
           "test": "serves in process when the discovery directory cannot be created"
         },
         {
           "suite": "integration",
-          "file": "tests/integration/daemon-cli.test.ts",
+          "file": "tests/integration/daemon-server-mode.test.ts",
           "test": "serves in process, promptly, when the daemon cannot start"
         }
       ]

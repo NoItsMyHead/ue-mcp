@@ -49,13 +49,11 @@ namespace
 
 	void CheckpointOnPreSave(UPackage* Package, FObjectPreSaveContext Context)
 	{
-		if (!Package || Context.IsCooking() || Context.IsProceduralSave()) return;
-		FString File = Context.GetTargetFilename();
-		if (File.IsEmpty())
-		{
-			const FString& Extension = Package->ContainsMap() ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension();
-			if (!FPackageName::TryConvertLongPackageNameToFilename(Package->GetName(), File, Extension)) return;
-		}
+		if (!Package || Context.IsCooking()) return;
+		// The package's own file, not the save's target: a save writes to a temp file under Saved and moves it into place.
+		const FString& Extension = Package->ContainsMap() ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension();
+		FString File;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(Package->GetName(), File, Extension)) return;
 		MCPCheckpointRecordBeforeWrite(File);
 	}
 

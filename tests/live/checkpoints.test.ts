@@ -210,7 +210,7 @@ describe("a turn through the server", () => {
     await tool("asset", "save", { assetPath: MAT });
     await tool("level", "place_actor", { actorClass: "PointLight", label: "CkLight" });
     await tool("level", "save");
-    await tool("project", "set_config", { configName: "DefaultGame", section: INI_SECTION, key: "Turn", value: "1" });
+    await tool("project", "set_config", { configName: "DefaultGame.ini", section: INI_SECTION, key: "Turn", value: "1" });
 
     const end = await tool("editor", "checkpoint", { label: "live turn end" });
     const changed = (end.changes as Json[]).map((c) => c.path as string);
@@ -235,7 +235,8 @@ describe("a turn through the server", () => {
     expect(restored.refused).toEqual([]);
     expect((restored.restored as Json[]).map((r) => r.path).sort()).toEqual(["Config/DefaultGame.ini", `Content/${BP_TURN.slice(6)}.uasset`]);
     expect(read(fileOf(BP_TURN))!.equals(before[fileOf(BP_TURN)]!)).toBe(true);
-    expect(read(ini())!.equals(before[ini()]!)).toBe(true);
+    // Byte-identical to the checkpoint, which includes not existing when the project had no DefaultGame.ini.
+    expect(read(ini())).toEqual(before[ini()]);
     expect(read(fileOf(MAT))!.equals(before[fileOf(MAT)]!)).toBe(false);
     expect(read(fileOf(LEVEL, ".umap"))!.equals(before[fileOf(LEVEL, ".umap")]!)).toBe(false);
 

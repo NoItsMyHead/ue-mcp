@@ -9,13 +9,16 @@ import {
   keyedCategory,
   parseImports,
   parseIncludes,
+  parsePackageImports,
   resolveImport,
   resolveInclude,
   specMethods,
   type TestGraph,
   type TestNode,
 } from "../../scripts/lib/test-graph.js";
+import { changedPackageKeys, dependencyDelta, packageOf, resolveFrom, treeOf, type DependencySnapshot } from "../../scripts/lib/lockfile-delta.js";
 import { opaqueReason, selectTests } from "../../scripts/lib/test-selection.js";
+import { descriptorStampOnly } from "../../scripts/lib/test-selection.js";
 import { LIFECYCLE_FILE, toSelectionFile } from "../../scripts/select-tests.js";
 
 const H = "plugin/ue_mcp_bridge/Source/UE_MCP_Bridge";
@@ -203,6 +206,139 @@ describe("selectTests on a fixture graph", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Dependency changes
+// ---------------------------------------------------------------------------
+
+type Entry = { version: string; dependencies?: Record<string, string> };
+const manifest = (deps: Record<string, string>, dev: Record<string, string>, extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ name: "ue-mcp", version: "1.0.0", dependencies: deps, devDependencies: dev, ...extra });
+const lockOf = (deps: Record<string, string>, dev: Record<string, string>, pkgs: Record<string, Entry>) =>
+  JSON.stringify({ lockfileVersion: 3, packages: { "": { name: "ue-mcp", dependencies: deps, devDependencies: dev }, ...pkgs } });
+
+const RUNTIME: Record<string, string> = { "level-lib": "^1.0.0", "log-lib": "^1.0.0" };
+const DEV: Record<string, string> = { vitest: "^3.0.0" };
+/** level-lib and vitest each pull in their own copy of shared; log-lib stands alone. */
+const BASE_PKGS: Record<string, Entry> = {
+  "node_modules/level-lib": { version: "1.0.0", dependencies: { shared: "^1.0.0" } },
+  "node_modules/shared": { version: "1.0.0" },
+  "node_modules/log-lib": { version: "1.0.0" },
+  "node_modules/vitest": { version: "3.0.0", dependencies: { shared: "^2.0.0" } },
+  "node_modules/vitest/node_modules/shared": { version: "2.0.0" },
+};
+const snap = (pkgs: Record<string, Entry>, deps = RUNTIME, dev = DEV, extra: Record<string, unknown> = {}): DependencySnapshot =>
+  ({ manifest: manifest(deps, dev, extra), lock: lockOf(deps, dev, pkgs) });
+const BASE = snap(BASE_PKGS);
+const withPackages = (): TestGraph => ({
+  ...fixture(),
+  packages: {
+    "src/tools/level.ts": ["level-lib"],
+    "src/core/log.ts": ["log-lib"],
+    "tests/live/server.ts": ["vitest"],
+  },
+});
+const LOCK = ["package-lock.json"];
+
+describe("lockfile delta", () => {
+  it("reads the package a bare specifier loads, and skips builtins and relative paths", () => {
+    expect(packageOf("isomorphic-git")).toBe("isomorphic-git");
+    expect(packageOf("@modelcontextprotocol/sdk/server/mcp.js")).toBe("@modelcontextprotocol/sdk");
+    expect(packageOf("js-yaml/dist/x.js")).toBe("js-yaml");
+    expect(packageOf("node:fs")).toBeNull();
+    expect(packageOf("fs")).toBeNull();
+    expect(packageOf("./a.js")).toBeNull();
+    const source = 'import git from "isomorphic-git";\nimport fs from "node:fs";\nimport { a } from "./a.js";\nconst y = await import("js-yaml");\n';
+    expect(parsePackageImports(source)).toEqual(["isomorphic-git", "js-yaml"]);
+  });
+
+  it("resolves a dependency the way node does, nearest node_modules first", () => {
+    const pkgs = JSON.parse(lockOf(RUNTIME, DEV, BASE_PKGS)).packages;
+    expect(resolveFrom(pkgs, "node_modules/vitest", "shared")).toBe("node_modules/vitest/node_modules/shared");
+    expect(resolveFrom(pkgs, "node_modules/level-lib", "shared")).toBe("node_modules/shared");
+    expect([...treeOf(pkgs, "level-lib")].sort()).toEqual(["node_modules/level-lib", "node_modules/shared"]);
+    const moved = { ...pkgs, "node_modules/shared": { version: "1.0.1" } };
+    expect(changedPackageKeys({ packages: pkgs }, { packages: moved })).toEqual(["node_modules/shared"]);
+  });
+
+  it("maps a transitive change to the top-level dependency that pulls it in", () => {
+    const d = dependencyDelta(BASE, snap({ ...BASE_PKGS, "node_modules/shared": { version: "1.0.1" } }));
+    expect(d.opaque).toBeNull();
+    expect([...d.runtime]).toEqual([["level-lib", ["shared"]]]);
+    expect(d.dev).toEqual([]);
+  });
+
+  it("a change in a devDependency's own copy reaches only that devDependency", () => {
+    const d = dependencyDelta(BASE, snap({ ...BASE_PKGS, "node_modules/vitest/node_modules/shared": { version: "2.0.1" } }));
+    expect([...d.runtime]).toEqual([]);
+    expect(d.dev).toEqual(["vitest"]);
+  });
+
+  it("a removed dependency is followed through the base tree", () => {
+    const rest = Object.fromEntries(Object.entries(BASE_PKGS).filter(([k]) => k !== "node_modules/log-lib"));
+    const d = dependencyDelta(BASE, snap(rest, { "level-lib": "^1.0.0" }));
+    expect([...d.runtime.keys()]).toEqual(["log-lib"]);
+  });
+
+  it("a manifest change outside the dependency fields cannot be followed", () => {
+    expect(dependencyDelta(BASE, snap(BASE_PKGS, RUNTIME, DEV, { scripts: { test: "vitest" } })).opaque).toMatch(/outside its dependencies \(scripts\)/);
+    expect(dependencyDelta(BASE, snap(BASE_PKGS, RUNTIME, DEV, { description: "stamped count" })).opaque).toBeNull();
+    expect(dependencyDelta({ manifest: BASE.manifest, lock: null }, BASE).opaque).toMatch(/no packages tree/);
+  });
+
+  it("v1.4.11-beta.3 to v1.4.11-beta.4: isomorphic-git is a runtime dependency, npm a devDependency", () => {
+    const fx = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "lockfile-beta3-beta4.json"), "utf8"));
+    const side = (s: { manifest: unknown; lock: unknown }): DependencySnapshot => ({ manifest: JSON.stringify(s.manifest), lock: JSON.stringify(s.lock) });
+    const d = dependencyDelta(side(fx.base), side(fx.head));
+    expect(d.opaque).toBeNull();
+    expect([...d.runtime.keys()]).toEqual(["isomorphic-git"]);
+    expect(d.runtime.get("isomorphic-git")).toEqual(expect.arrayContaining(["isomorphic-git", "pako", "sha.js"]));
+    expect(d.dev).toEqual(["npm"]);
+  });
+});
+
+describe("selectTests on a dependency change", () => {
+  it("a runtime package change selects what its importers reach, as a change to them would", () => {
+    const head = snap({ ...BASE_PKGS, "node_modules/shared": { version: "1.0.1" } });
+    const sel = selectTests(withPackages(), LOCK, { dependencies: { base: BASE, head } });
+    expect(sel.full).toBe(false);
+    expect(sel.tests.map((t) => t.id).sort()).toEqual(ids(fixture(), ["src/tools/level.ts"]));
+    expect(sel.tests.find((t) => t.id === "tests/live/bcov-level.test.ts")!.reason).toContain("src/tools/level.ts (imports level-lib, changed in package-lock.json)");
+    expect(sel.dependencies!.importers).toEqual({ "level-lib": ["src/tools/level.ts"] });
+    expect(sel.inert).toEqual([]);
+  });
+
+  it("a devDependency change selects no editor test", () => {
+    const head = snap({ ...BASE_PKGS, "node_modules/vitest": { version: "3.1.0", dependencies: { shared: "^2.0.0" } } });
+    const sel = selectTests(withPackages(), ["package.json", ...LOCK], { dependencies: { base: BASE, head } });
+    expect(sel.full).toBe(false);
+    expect(sel.tests).toEqual([]);
+    expect(sel.dependencies!.dev).toEqual(["vitest"]);
+    expect(sel.inert).toEqual(["package.json", "package-lock.json"]);
+  });
+
+  it("a new runtime package nothing in src/ imports selects no editor test", () => {
+    const head = snap({ ...BASE_PKGS, "node_modules/unused": { version: "1.0.0" } }, { ...RUNTIME, unused: "^1.0.0" });
+    const sel = selectTests(withPackages(), ["package.json", ...LOCK], { dependencies: { base: BASE, head } });
+    expect(sel.full).toBe(false);
+    expect(sel.tests).toEqual([]);
+    expect(sel.dependencies!.unimported).toEqual(["unused"]);
+  });
+
+  it("a package imported on the dispatch path selects the full suite through the graph", () => {
+    const head = snap({ ...BASE_PKGS, "node_modules/log-lib": { version: "1.0.1" } });
+    const sel = selectTests(withPackages(), LOCK, { dependencies: { base: BASE, head } });
+    expect(sel.full).toBe(true);
+    expect(sel.fullReason).toMatch(/src\/core\/log\.ts \(imports log-lib.*reaches the dispatch path/);
+  });
+
+  it("a manifest change it cannot follow, and a stable release, select the full suite", () => {
+    const head = snap(BASE_PKGS, RUNTIME, DEV, { bin: { x: "dist/x.js" } });
+    expect(selectTests(withPackages(), ["package.json"], { dependencies: { base: BASE, head } }).fullReason).toMatch(/outside its dependencies \(bin\)/);
+    const moved = snap({ ...BASE_PKGS, "node_modules/vitest": { version: "3.1.0" } });
+    expect(selectTests(withPackages(), LOCK, { stable: true, dependencies: { base: BASE, head: moved } }).full).toBe(true);
+  });
+});
+
 describe("graph parsing", () => {
   it("reads quoted includes and skips engine and generated headers", () => {
     expect(parseIncludes('#include "HandlerUtils.h"\n  #  include "PCG/PCGHandlers.h"\n#include <CoreMinimal.h>\n#include "Foo.generated.h"\n')).toEqual([
@@ -275,10 +411,37 @@ describe("the real graph", () => {
     expect(live).not.toContain(LIFECYCLE_FILE);
   });
 
+  it("records the packages src/ imports, so a lockfile change can start from them", () => {
+    expect(graph.packages?.["src/checkpoints/shadow-repo.ts"]).toContain("isomorphic-git");
+    expect(graph.packages?.["src/bridge/bridge.ts"]).toContain("ws");
+  });
+
+  it("v1.4.11-beta.3 to v1.4.11-beta.4 starts from the module that imports isomorphic-git", () => {
+    const fx = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "lockfile-beta3-beta4.json"), "utf8"));
+    const side = (s: { manifest: unknown; lock: unknown }): DependencySnapshot => ({ manifest: JSON.stringify(s.manifest), lock: JSON.stringify(s.lock) });
+    const sel = selectTests(graph, ["package.json", "package-lock.json"], { dependencies: { base: side(fx.base), head: side(fx.head) } });
+    // The checkpoint service the server runtime imports holds the shadow repository, so it is on the dispatch path.
+    expect(sel.fullReason).toMatch(/^src\/checkpoints\/shadow-repo\.ts \(imports isomorphic-git, changed in package\.json and package-lock\.json\) reaches the dispatch path/);
+  });
+
   it("rebuilds from the cache without reparsing an unchanged file", () => {
     const stats = { files: 0, reparsed: 0 };
     buildTestGraph(repo, { cacheFile, stats });
     expect(stats.files).toBeGreaterThan(1000);
     expect(stats.reparsed).toBe(0);
+  });
+});
+
+describe("a plugin descriptor change", () => {
+  const descriptor = (o: Record<string, unknown>) => JSON.stringify({ FileVersion: 3, Version: 1, VersionName: "1.4.11-beta.3", Description: "2038+ editor actions", Modules: [{ Name: "UE_MCP_Bridge", Type: "Editor" }], ...o }, null, "\t");
+
+  it("that only restamps the version and the action count selects nothing", () => {
+    expect(descriptorStampOnly(descriptor({}), descriptor({ VersionName: "1.4.11-beta.4", Version: 2, Description: "2044+ editor actions" }))).toBe(true);
+  });
+
+  it("that changes anything else is still opaque", () => {
+    expect(descriptorStampOnly(descriptor({}), descriptor({ Modules: [{ Name: "UE_MCP_Bridge", Type: "Runtime" }] }))).toBe(false);
+    expect(descriptorStampOnly(descriptor({}), null)).toBe(false);
+    expect(descriptorStampOnly("not json", descriptor({}))).toBe(false);
   });
 });

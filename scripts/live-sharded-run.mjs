@@ -343,9 +343,8 @@ export async function runSharded(opts) {
   let entries = liveFiles(repoRoot);
   if (opts.files?.length) entries = entries.filter((e) => opts.files.some((f) => e.file.includes(f)));
 
-  const otherKinds = [...new Set(entries.map((e) => e.kind))].filter((t) => ["base", "render", "interactive", "scm"].includes(t));
   const memoryAtStart = { freeMB: freeMB(), totalMB: totalMB() };
-  const fitted = headlessShardCount({ ...memoryAtStart, otherKinds });
+  const fitted = headlessShardCount(memoryAtStart);
   const headless = opts.headless ? Math.min(opts.headless, fitted) : fitted;
   let plan = planShards(entries, baseline, { ...opts, headless });
   if (opts.onlyShard) {

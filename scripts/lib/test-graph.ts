@@ -21,6 +21,7 @@ import * as path from "node:path";
 import ts from "typescript";
 
 import { listRegistrations } from "./cpp-registrations.mjs";
+import { packageOf } from "./lockfile-delta.js";
 import { maskLiterals } from "./tool-source.mjs";
 import { helperSpans, walk } from "./test-scan.js";
 import { bridgeActionMap, cppDispatches, forwardingHelpers, tsDispatches } from "../behavioural-coverage.js";
@@ -55,6 +56,8 @@ export interface TestGraph {
   actions: Record<string, ActionNode>;
   keyed: Record<string, KeyedModule>;
   dispatch: string[];
+  /** File -> the npm packages it imports by bare specifier, for a lockfile change to start from. */
+  packages?: Record<string, string[]>;
   /** The files that run the tests; a change to one reruns everything. */
   runners: string[];
   tests: TestNode[];
@@ -91,6 +94,21 @@ export function parseImports(source: string): string[] {
   if (/(["'])src\1\s*,\s*(["'])index\.ts\2|["'`/]src\/index\.ts["'`]/.test(source)) out.push(SPAWN_SPEC);
   return out;
 }
+
+/** The npm packages TS or JS source imports by bare specifier, builtins left out. */
+export function parsePackageImports(source: string): string[] {
+  const info = ts.preProcessFile(source, true, true);
+  const out = new Set<string>();
+  for (const f of info.importedFiles) {
+    const name = packageOf(f.fileName);
+    if (name) out.add(name);
+  }
+  return [...out].sort();
+}
+
+/** Package imports ride in the cached spec list under this prefix. */
+const PACKAGE_SPEC = "pkg:";
+const parseTsSpecs = (source: string) => [...parseImports(source), ...parsePackageImports(source).map((p) => `${PACKAGE_SPEC}${p}`)];
 
 /** A relative specifier as a repo file, or null when it leaves the known set. */
 export function resolveImport(from: string, spec: string, known: Set<string>): string | null {
@@ -157,7 +175,7 @@ export function specMethods(source: string): string[] {
 
 interface CacheEntry { size: number; mtimeMs: number; sha1: string; specs: string[] }
 interface Cache { version: number; files: Record<string, CacheEntry> }
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 function readCache(file: string): Cache {
   try {
@@ -216,14 +234,21 @@ export function buildTestGraph(repo: string, opts: { cacheFile?: string; stats?:
   };
 
   const deps: Record<string, string[]> = {};
+  const packages: Record<string, string[]> = {};
   const tsKnown = new Set(tsFiles);
   for (const f of tsFiles) {
     const out = new Set<string>();
-    for (const spec of specsOf(f, parseImports)) {
+    const pkgs: string[] = [];
+    for (const spec of specsOf(f, parseTsSpecs)) {
+      if (spec.startsWith(PACKAGE_SPEC)) {
+        pkgs.push(spec.slice(PACKAGE_SPEC.length));
+        continue;
+      }
       const hit = resolveImport(f, spec, tsKnown);
       if (hit && hit !== f) out.add(hit);
     }
     deps[f] = [...out].sort();
+    if (pkgs.length > 0) packages[f] = pkgs;
   }
   const cppKnown = new Set(cppFiles);
   const byName = new Map<string, string[]>();
@@ -268,6 +293,7 @@ export function buildTestGraph(repo: string, opts: { cacheFile?: string; stats?:
     actions,
     keyed,
     dispatch: DISPATCH_ROOTS.filter((r) => r in deps),
+    packages,
     runners: [...closure(deps, RUNNER_ROOTS)].sort(),
     tests: [...liveTests(repo, read, methods, byCategory), ...automationTests(read, cppFiles, methods)],
   };

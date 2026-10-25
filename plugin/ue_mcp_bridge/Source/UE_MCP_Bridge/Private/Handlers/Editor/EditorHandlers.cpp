@@ -3474,6 +3474,7 @@ TSharedPtr<FJsonValue> FEditorHandlers::SaveDirty(const TSharedPtr<FJsonObject>&
 		FSavePackageArgs SaveArgs;
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		SaveArgs.Error = GError;
+		MCPCheckpointRecordBeforeWrite(FileName);
 		const bool bOk = UPackage::SavePackage(Pkg, nullptr, *FileName, SaveArgs);
 		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
 		Entry->SetStringField(TEXT("package"), PackageName);

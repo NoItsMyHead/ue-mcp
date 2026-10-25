@@ -207,14 +207,14 @@ export function headroomMB(totalMB) {
 
 /**
  * How many headless shards fit in the memory free now. The headless editors
- * run for most of the suite; the base, render, interactive and scm editors are
- * short and take turns, so room is kept for the largest of them rather than
- * for all at once. At least one, at most `max`.
+ * run for most of the suite. The base, render, interactive and scm editors are
+ * short and wait for memory at launch like any other, so no room is held back
+ * for them: holding it on a 32 GB machine with 16 GB free left one headless
+ * editor to run 116 files alone (1.4.11-beta.4, 752 s). At least one, at most `max`.
  */
-/** @param {{ freeMB: number, totalMB: number, otherKinds?: string[], max?: number }} opts */
-export function headlessShardCount({ freeMB, totalMB, otherKinds = [], max = 8 }) {
-  const turn = Math.max(0, ...otherKinds.map((k) => EDITOR_PEAK_MB[k] ?? EDITOR_PEAK_MB.headless));
-  const fits = Math.floor((freeMB - headroomMB(totalMB) - turn) / EDITOR_PEAK_MB.headless);
+/** @param {{ freeMB: number, totalMB: number, max?: number }} opts */
+export function headlessShardCount({ freeMB, totalMB, max = 8 }) {
+  const fits = Math.floor((freeMB - headroomMB(totalMB)) / EDITOR_PEAK_MB.headless);
   return Math.max(1, Math.min(max, fits));
 }
 

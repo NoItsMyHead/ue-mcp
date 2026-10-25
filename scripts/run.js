@@ -104,7 +104,9 @@ async function main() {
   if (result.ready) {
     log(`Editor ready in ${result.elapsedSeconds.toFixed(1)}s`, 'green');
   } else {
-    log(`Editor did not become ready: ${result.reason}`, 'yellow');
+    // A caller that goes on to test the editor (the release runner) must not read this as a launch.
+    log(`Editor did not become ready: ${result.reason}`, 'red');
+    process.exitCode = 1;
   }
 }
 

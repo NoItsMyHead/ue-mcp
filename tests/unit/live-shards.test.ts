@@ -108,13 +108,15 @@ describe("shard copies", () => {
 });
 
 describe("memory decides the editor count", () => {
-  it("fits headless shards into what is free after the headroom and one short editor's turn", () => {
-    // 32 GB, 28 GB free: 28672 - 4096 headroom - 5600 for the largest short editor = 18976, five of 3600.
-    expect(headlessShardCount({ freeMB: 28672, totalMB: 32768, otherKinds: ["render", "scm", "base"] })).toBe(5);
+  it("fits headless shards into what is free after the headroom; the short editors queue for memory", () => {
+    // 32 GB, 28 GB free: 28672 - 4096 headroom = 24576, six of 3600.
+    expect(headlessShardCount({ freeMB: 28672, totalMB: 32768 })).toBe(6);
+    // A 32 GB desktop with 16 GB free runs three, not the one a held-back turn left room for.
+    expect(headlessShardCount({ freeMB: 16383, totalMB: 32679 })).toBe(3);
   });
 
   it("still runs one headless shard on a busy machine, and never more than the cap", () => {
-    expect(headlessShardCount({ freeMB: 5000, totalMB: 32768, otherKinds: ["render"] })).toBe(1);
+    expect(headlessShardCount({ freeMB: 5000, totalMB: 32768 })).toBe(1);
     expect(headlessShardCount({ freeMB: 500_000, totalMB: 524_288, max: 8 })).toBe(8);
   });
 

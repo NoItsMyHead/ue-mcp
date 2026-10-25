@@ -11,6 +11,8 @@
 #include "Engine/SkeletalMesh.h"
 #include "ReferenceSkeleton.h"
 #include "DiffUtils.h"
+#include "PackageTools.h"
+#include "Misc/ScopeExit.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
@@ -622,11 +624,27 @@ TSharedPtr<FJsonValue> FDiffHandlers::DiffCheckpointBlueprint(const TSharedPtr<F
 	const FPackagePath OriginalPath = FPackagePath::FromLocalPath(OriginalFile);
 
 	// A checkpoint's copy under Saved/Diff maps to /Temp and loads as a diff package, the way a revision does.
-	auto LoadSnapshot = [&OriginalPath](const FString& File) -> UBlueprint*
+	// Every snapshot loaded here is unloaded before returning, so no errored /Temp Blueprint is left
+	// behind for a later compile check to find, and the copy's file is released for the server to delete.
+	TArray<UPackage*> Snapshots;
+	ON_SCOPE_EXIT
+	{
+		if (Snapshots.Num() == 0) return;
+		for (UPackage* Package : Snapshots)
+		{
+			ResetLoaders(Package);
+		}
+		FText UnloadError;
+		UPackageTools::UnloadPackages(Snapshots, UnloadError, /*bUnloadDirtyPackages*/ true);
+		CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+	};
+	auto LoadSnapshot = [&OriginalPath, &Snapshots](const FString& File) -> UBlueprint*
 	{
 		if (!IFileManager::Get().FileExists(*File)) return nullptr;
 		UPackage* Package = DiffUtils::LoadPackageForDiff(FPackagePath::FromLocalPath(File), OriginalPath);
-		return Package ? Cast<UBlueprint>(Package->FindAssetInPackage()) : nullptr;
+		if (!Package) return nullptr;
+		Snapshots.AddUnique(Package);
+		return Cast<UBlueprint>(Package->FindAssetInPackage());
 	};
 
 	UBlueprint* A = LoadSnapshot(FromFile);

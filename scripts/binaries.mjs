@@ -149,6 +149,9 @@ async function buildEngine(engine) {
   const code = await runAsync(script, [
     "UnrealEditor", platform, "Development",
     `-Project=${hostProject}`, `-plugin=${path.join(hostPlugin, path.basename(PLUGIN))}`, `-manifest=${manifest}`, "-nohotreload",
+    // Its own host project and intermediates, so it needs no claim on UBT's single-instance lock.
+    // Holding it stalled an editor launched beside it for 294 s in its AutoSDK step.
+    "-NoMutex",
     // Each engine's UBT its own log: two in parallel otherwise fight over %LOCALAPPDATA%/UnrealBuildTool/Log.txt.
     `-log=${path.join(stage, "UBT.log")}`,
   ], logFile);

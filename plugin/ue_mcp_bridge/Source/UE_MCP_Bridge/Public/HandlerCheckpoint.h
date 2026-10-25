@@ -14,10 +14,10 @@
  */
 
 /** Record a file (absolute or relative to the process) before it is written, renamed or deleted. */
-void MCPCheckpointRecordBeforeWrite(const FString& Filename);
+UE_MCP_BRIDGE_API void MCPCheckpointRecordBeforeWrite(const FString& Filename);
 
 /** Record a package's file, found by long package name, before it is written, renamed or deleted. */
-void MCPCheckpointRecordPackage(const FString& PackageName);
+UE_MCP_BRIDGE_API void MCPCheckpointRecordPackage(const FString& PackageName);
 
 /** Record the source package of every asset a rename batch is about to move. */
 inline void MCPCheckpointRecordRenameSources(const TArray<FAssetRenameData>& Batch)

@@ -8,10 +8,14 @@
  *   - A category-keyed module (src/tools/pcg.ts, src/tools/specs/pcg.generated.ts) is data the shared
  *     registries look up per action. The walk stops at the edge from it to a registry and credits its
  *     category instead, so a change behind it reaches that category's actions, not every action.
+ *   - A dependency change starts from the src/ modules that import the top-level dependencies whose
+ *     installed tree changed (scripts/lib/lockfile-delta.ts). A devDependency, or a package nothing in
+ *     src/ imports, selects no editor test. Without both sides of the diff it selects the full suite.
  *   - A change the graph cannot see selects the full suite: Build.cs, the .uplugin, Config/, tests/ue_mcp,
- *     package.json, the lockfile, the test runners, and plugin files no test or action reaches.
+ *     package.json outside its dependency fields, the test runners, and plugin files no test or action reaches.
  *   - A stable release always runs the full suite.
  */
+import { dependencyDelta, type DependencySnapshot } from "./lockfile-delta.js";
 import type { TestGraph, TestNode } from "./test-graph.js";
 
 export interface SelectedTest {
@@ -32,11 +36,47 @@ export interface Selection {
   actions: string[];
   /** Changed files that select no test. */
   inert: string[];
+  /** What a package.json or package-lock.json change reached, when one was followed. */
+  dependencies?: DependencyReport;
+}
+
+export interface DependencyReport {
+  /** Runtime top-level dependency -> the src/ modules that import it. */
+  importers: Record<string, string[]>;
+  /** Runtime top-level dependencies whose tree changed and that nothing in src/ imports. */
+  unimported: string[];
+  /** devDependencies whose tree changed. */
+  dev: string[];
 }
 
 export interface SelectOptions {
   /** A stable release runs everything. */
   stable?: boolean;
+  /** package.json and package-lock.json at both ends of the diff. Without them a change to either selects the full suite. */
+  dependencies?: { base: DependencySnapshot; head: DependencySnapshot };
+}
+
+const DEPENDENCY_FILES = ["package.json", "package-lock.json"];
+
+/** Descriptor fields the release stamps on every version: a change to only these alters no behaviour. */
+const DESCRIPTOR_STAMP_FIELDS = ["Version", "VersionName", "Description"];
+
+/**
+ * Whether two versions of a .uplugin differ only in the fields `generate:metadata` stamps (the version
+ * and the action count in the description). Such a change is not opaque: it selects nothing.
+ */
+export function descriptorStampOnly(baseText: string | null, headText: string | null): boolean {
+  if (baseText === null || headText === null) return false;
+  try {
+    const strip = (t: string) => {
+      const o = JSON.parse(t) as Record<string, unknown>;
+      for (const k of DESCRIPTOR_STAMP_FIELDS) delete o[k];
+      return JSON.stringify(o);
+    };
+    return strip(baseText) === strip(headText);
+  } catch {
+    return false;
+  }
 }
 
 /** Why the graph cannot see a file's effect, or null when it can. */
@@ -68,7 +108,7 @@ interface Reach {
 }
 
 /** The reverse walk, stopping where a keyed module meets a dependent outside its category. */
-export function reach(graph: TestGraph, rev: Map<string, string[]>, sources: string[]): Reach {
+export function reach(graph: TestGraph, rev: Map<string, string[]>, sources: string[], labels?: Map<string, string>): Reach {
   const out: Reach = { files: new Map(), categories: new Map(), methods: new Map() };
   const queue: string[] = [];
   const visit = (f: string, from: string) => {
@@ -76,7 +116,7 @@ export function reach(graph: TestGraph, rev: Map<string, string[]>, sources: str
     out.files.set(f, from);
     queue.push(f);
   };
-  for (const s of sources) visit(s, s);
+  for (const s of sources) visit(s, labels?.get(s) ?? s);
   while (queue.length > 0) {
     const f = queue.shift()!;
     const from = out.files.get(f)!;
@@ -105,7 +145,9 @@ export function selectTests(graph: TestGraph, changed: string[], opts: SelectOpt
     inert: [],
   });
   if (opts.stable) return all("a stable release runs the full suite");
+  const depChanged = changed.filter((f) => DEPENDENCY_FILES.includes(f));
   for (const f of changed) {
+    if (opts.dependencies && depChanged.includes(f)) continue;
     const why = opaqueReason(f);
     if (why) return all(`${f} changed (${why}), which the graph cannot see`);
   }
@@ -114,9 +156,29 @@ export function selectTests(graph: TestGraph, changed: string[], opts: SelectOpt
   const unseen = changed.find((f) => f.startsWith("plugin/") && !(f in graph.deps));
   if (unseen) return all(`${unseen} changed, and the graph has no node for it`);
 
+  // A dependency change starts from the src/ modules that import a top-level dependency whose tree moved.
+  let dependencies: DependencyReport | undefined;
+  const labels = new Map<string, string>();
+  if (opts.dependencies && depChanged.length > 0) {
+    const delta = dependencyDelta(opts.dependencies.base, opts.dependencies.head);
+    if (delta.opaque) return all(`${delta.opaque}, which the graph cannot see`);
+    dependencies = { importers: {}, unimported: [], dev: delta.dev };
+    for (const top of delta.runtime.keys()) {
+      const files = Object.entries(graph.packages ?? {})
+        .filter(([f, pkgs]) => f.startsWith("src/") && pkgs.includes(top))
+        .map(([f]) => f)
+        .sort();
+      if (files.length === 0) dependencies.unimported.push(top);
+      else dependencies.importers[top] = files;
+      for (const f of files) {
+        if (!changed.includes(f) && !labels.has(f)) labels.set(f, `${f} (imports ${top}, changed in ${depChanged.join(" and ")})`);
+      }
+    }
+  }
+
   const rev = dependents(graph.deps);
   const known = changed.filter((f) => f in graph.deps);
-  const r = reach(graph, rev, known);
+  const r = reach(graph, rev, [...known, ...labels.keys()], labels);
 
   // A plugin file that reaches no action and no test holds code the graph cannot follow, such as
   // module startup or the socket server, which every action runs through.
@@ -171,7 +233,7 @@ export function selectTests(graph: TestGraph, changed: string[], opts: SelectOpt
       : n === actionCount ? `${widest} reaches every action` : "the changed files together reach every action";
     return all(why);
   }
-  if (tests.length === graph.tests.length) return { ...all("the change reaches every test"), tests };
+  if (tests.length === graph.tests.length) return { ...all("the change reaches every test"), tests, dependencies };
   const inert = changed.filter((f) => !tests.some((t) => t.reason.includes(f)));
-  return { full: false, tests, actions: [...affected.keys()].sort(), inert };
+  return { full: false, tests, actions: [...affected.keys()].sort(), inert, dependencies };
 }

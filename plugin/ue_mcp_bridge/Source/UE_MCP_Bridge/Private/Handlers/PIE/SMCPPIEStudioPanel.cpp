@@ -1,4 +1,5 @@
 #include "Handlers/PIE/SMCPPIEStudioPanel.h"
+#include "HandlerCheckpoint.h"
 #include "Handlers/PIE/PIELog.h"
 #include "Handlers/PIE/PIEInputRecorder.h"
 #include "Handlers/PIE/PIEInputReplayer.h"
@@ -568,6 +569,7 @@ TSharedRef<SWidget> SMCPPIEStudioPanel::BuildProfilesSection()
 					NewProfile->MarkPackageDirty();
 
 					FString PackageFilename = FPackageName::LongPackageNameToFilename(FullPath, FPackageName::GetAssetPackageExtension());
+					MCPCheckpointRecordBeforeWrite(PackageFilename);
 					UPackage::SavePackage(Pkg, NewProfile, *PackageFilename, FSavePackageArgs());
 
 					GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(NewProfile);

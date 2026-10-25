@@ -148,14 +148,18 @@ const editorLane = pluginChanged
 const afterLive = runLifecycle ? [["up-lifecycle", npm, ["run", "up"]], ["lifecycle", npm, ["run", "test:live", "--", "--lifecycle"]]] : [];
 const needsBuild = pluginChanged || runLive || runLifecycle;
 
+const binaries = lane([
+  ["binaries", npm, ["run", "binaries:build"]],
+  ["binaries-upload", npm, ["run", "binaries:upload"]],
+]);
 const lanes = [
-  lane([
-    ["binaries", npm, ["run", "binaries:build"]],
-    ["binaries-upload", npm, ["run", "binaries:upload"]],
-  ]),
+  binaries,
   (async () => {
     if (!needsBuild) return true;
     if (!(await lane([["deploy", node, ["scripts/deploy.mjs"]], ["build", npm, ["run", "build"]], ...editorLane]))) return false;
+    // The live suite sizes its shards to the memory free when it starts, and a binaries compile
+    // still running beside it cost 1.4.11-beta.4 its second headless shard (884 s on one). Wait for it.
+    await binaries;
     // Lifecycle after live, not beside it: its editor beside the shards ran the machine out of memory.
     return lane([...(runLive ? [["live", npm, ["run", "test:live", ...selected]]] : []), ...afterLive]);
   })(),
